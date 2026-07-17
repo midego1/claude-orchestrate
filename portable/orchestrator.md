@@ -1,6 +1,6 @@
 # Orchestrator Protocol — Portable Edition
 
-Agent-agnostic version of the [claude-orchestrate](https://github.com/midego1/claude-orchestrate) protocol. Works with **any coding agent that follows repo instructions**: OpenAI Codex CLI, opencode, Cursor, Gemini CLI, GitHub Copilot, Aider, and others. Paste this file's content into your agent's instruction file (`AGENTS.md`, `GEMINI.md`, `.cursor/rules/`, `.github/copilot-instructions.md`, …) or keep it as a separate file and reference it.
+Agent-agnostic version of the [claude-orchestrate](https://github.com/midego1/claude-orchestrate) protocol. Works with **any coding agent that follows repo instructions**: OpenAI Codex on every surface (the ChatGPT app, CLI, IDE extension, and web — they all read `AGENTS.md`), opencode, Cursor, Gemini CLI, GitHub Copilot, Aider, and others. Paste this file's content into your agent's instruction file (`AGENTS.md`, `GEMINI.md`, `.cursor/rules/`, `.github/copilot-instructions.md`, …) or keep it as a separate file and reference it.
 
 Claude Code users: don't use this file — install [the plugin](../README.md#install) instead; it pins worker models and reasoning effort per agent, which this portable edition can only approximate.
 
