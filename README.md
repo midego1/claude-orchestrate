@@ -103,7 +103,7 @@ Given a substantive task, the orchestrator:
 
 1. **Decomposes** it into independent units, each with explicit inputs, outputs, and machine-checkable done-criteria.
 2. **Classifies** each unit into a complexity tier (T0–T3) and announces the routing plan as one compact table — before spending anything.
-3. **Hands execution to a foreman** (an Opus sub-agent) that dispatches workers in parallel, runs verification gates, triages failures, and manages retries — without the expensive top model in the loop. (Plans of ≤3 units skip the foreman; the orchestrator runs the loop and the gates itself.)
+3. **Hands execution to a foreman** (an Opus sub-agent) that dispatches workers in synchronous parallel waves, runs verification gates, triages failures, and manages retries — without the expensive top model in the loop. (Plans of ≤3 units skip the foreman; the orchestrator runs the loop and the gates itself.)
 4. **Verifies everything through gates.** Mechanical checks first (tests, builds, grep invariants — free), then cheap verifier agents that must cite evidence. A verdict without evidence is a FAIL.
 5. **Escalates only real capability failures** — after triage rules out bad specs and broken environments — one step at a time (effort before model), capped at 3 dispatches per unit and a global dispatch cap for the plan.
 6. **Integrates** gate-passed results, checks cross-unit consistency, runs a final **ship gate** — automated code review plus security review over the integrated diff — and ships.
@@ -150,6 +150,8 @@ flowchart TB
 ```
 
 *Plans of ≤3 units skip the foreman — the orchestrator dispatches and runs the gates itself. Everything else in the picture is unchanged.*
+
+*Worker results flow back **synchronously** by design (v0.4.2): workers are parallel `Agent` tool calls inside one foreman message, dispatched with `run_in_background: false` (background is the harness default), so every result — first attempts and retries alike — returns inline as a tool result. No background workers, no completion-notification routing, no worker→foreman messaging: a sub-agent's background children stop notifying it once it idles (their results escalate to the main session), and agent handles are session-scoped, so a worker can't message its dispatcher anyway. Only the foreman itself may run in the background — the orchestrator spawned it, so its completion notification routes back correctly.*
 
 ### The three ideas that carry the design
 

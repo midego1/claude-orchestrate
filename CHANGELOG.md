@@ -2,6 +2,18 @@
 
 All notable changes to the orchestrate plugin. The update notifier reads this file — keep the **Why update** line on every release.
 
+## [0.4.2] — 2026-07-17
+
+Fixes worker→foreman result routing, observed in a live run on v0.4.1: retried workers' completions escalated to the main session instead of the idle foreman, and workers trying to SendMessage the foreman failed (agent handles are session-scoped) — every retry result bounced through the orchestrator, the exact overhead the protocol exists to avoid.
+
+- **Workers and verifiers are dispatched synchronously** — `run_in_background: false`, passed explicitly because background is the harness default. Wave parallelism = multiple Agent calls in a single message (parallel tool use); results return inline as tool results, no notification routing involved
+- **A worker's final text IS its report**: dispatch prompts must never instruct a worker to SendMessage, notify, or report to the foreman or main — workers hold no handle to their dispatcher
+- **Retries are fresh synchronous dispatches** carrying the failed attempt's report + verifier verdict — never a SendMessage-resume of an idle worker (a resumed worker doesn't count as the sender's live background child, so its completion escalates to the main session)
+- **Background workers forbidden**; over-long units get split instead. Escape hatch: if one exists anyway, the foreman polls observable state (branch/commit SHA, archive files) rather than idling for a notification. The foreman itself may still run in the background — the orchestrator spawned it, so its completion routes back correctly
+- Portable edition aligned: prefer inline-returning sub-tasks; poll observable state when async dispatch is unavoidable
+
+**Why update:** on v0.4.1 every retried worker's result detoured through your main session, costing orchestrator turns and tokens; v0.4.2 makes all worker dispatch synchronous so results return inline.
+
 ## [0.4.1] — 2026-07-17
 
 - Update notifier now checks at most once per **hour** (was 24h) — releases can land daily or faster, and one silent hour is a better trade than a silent day
