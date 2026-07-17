@@ -4,6 +4,46 @@
 
 Ships as a first-class **[Claude Code](https://claude.com/claude-code) plugin**, plus a **[portable edition](portable/orchestrator.md)** for every other agent — OpenAI Codex (ChatGPT app, CLI, IDE, web), opencode, Cursor, Gemini CLI, GitHub Copilot, Aider, and anything else that reads repo instructions. See [Using it outside Claude Code](#using-it-outside-claude-code).
 
+## 🚀 Install
+
+In Claude Code, run:
+
+```
+/plugin marketplace add midego1/claude-orchestrate
+/plugin install orchestrate@claude-orchestrate
+```
+
+Start a **new session** (plugins load at session start) and verify the `orchestrate` skill and the `foreman` / `verifier-fast` / `verifier-deep` agents appear. Then set up the [ideal model configuration](#%EF%B8%8F-ideal-setup-which-model-to-select-in-claude-code) and try it: `/orchestrate <a substantive task>`.
+
+**Team-wide, per repo** — add to your repo's `.claude/settings.json` so everyone gets it automatically:
+
+```json
+{
+  "extraKnownMarketplaces": {
+    "claude-orchestrate": {
+      "source": { "source": "github", "repo": "midego1/claude-orchestrate" }
+    }
+  },
+  "enabledPlugins": {
+    "orchestrate@claude-orchestrate": true
+  }
+}
+```
+
+**Manual copy** — copy `skills/orchestrate/` into your repo's `.claude/skills/` and `agents/*.md` into `.claude/agents/`.
+
+**Recommended: activation nudge in CLAUDE.md** — skill triggering is description-based; this one-liner makes it near-deterministic (`CLAUDE.md` is read at the start of every session):
+
+```markdown
+## Orchestration
+
+For substantive multi-unit tasks (>~3 independent units, multi-file changes,
+or work that benefits from parallel workers), use the `orchestrate` skill.
+Trivial turns and single-file fixes: work directly, no orchestration.
+```
+
+**Not using Claude Code?** See [Using it outside Claude Code](#using-it-outside-claude-code).
+
 ---
 
 ## ⚡ When does it activate?
@@ -24,7 +64,7 @@ It deliberately stays **out of the way** on trivial turns — single-file fixes,
 
 e.g. `/orchestrate migrate all 40 API routes to the new error-handling pattern`
 
-> **Tip — make auto-activation near-deterministic:** skill triggering is description-based. Add a one-line rule to your repo's `CLAUDE.md` (see [Install](#install)) and the orchestrator fires reliably on every substantive task.
+> **Tip — make auto-activation near-deterministic:** skill triggering is description-based. Add a one-line rule to your repo's `CLAUDE.md` (see [Install](#-install)) and the orchestrator fires reliably on every substantive task.
 
 ## 🎛️ Ideal setup: which model to select in Claude Code
 
@@ -138,48 +178,6 @@ Effort is a second, cheaper lever than model choice — Sonnet at `xhigh` often 
 | [`agents/foreman`](agents/foreman.md) | opus @ high | Execution manager: dispatch loop, gates, triage, retries, escalation ledger |
 | [`agents/verifier-fast`](agents/verifier-fast.md) | haiku | Gate 2: PASS/FAIL per done-criterion, evidence required |
 | [`agents/verifier-deep`](agents/verifier-deep.md) | sonnet @ xhigh | Gate 2 for judgment calls: also reasons about what's *missing* vs. the spec |
-
-## Install
-
-### As a plugin (recommended)
-
-```
-/plugin marketplace add midego1/claude-orchestrate
-/plugin install orchestrate@claude-orchestrate
-```
-
-### Team-wide, per repo
-
-Add to your repo's `.claude/settings.json` — everyone on the team gets it automatically:
-
-```json
-{
-  "extraKnownMarketplaces": {
-    "claude-orchestrate": {
-      "source": { "source": "github", "repo": "midego1/claude-orchestrate" }
-    }
-  },
-  "enabledPlugins": {
-    "orchestrate@claude-orchestrate": true
-  }
-}
-```
-
-### Manual copy
-
-Copy `skills/orchestrate/` into your repo's `.claude/skills/` and `agents/*.md` into `.claude/agents/`.
-
-### Recommended: activation nudge in CLAUDE.md
-
-```markdown
-## Orchestration
-
-For substantive multi-unit tasks (>~3 independent units, multi-file changes,
-or work that benefits from parallel workers), use the `orchestrate` skill.
-Trivial turns and single-file fixes: work directly, no orchestration.
-```
-
-`CLAUDE.md` is read at the start of every session, so this makes activation near-deterministic instead of relying on description matching alone.
 
 ## Using it outside Claude Code
 
