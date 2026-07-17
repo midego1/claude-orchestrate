@@ -1,6 +1,8 @@
 # claude-orchestrate
 
-**Multi-agent orchestration plugin for [Claude Code](https://claude.com/claude-code).** Your frontier model plans, routes, and verifies; cheap workers do the volume. Every unit of work is routed to the cheapest model that can reliably do it, checked by evidence-gated verification (a sub-agent's "done!" is never trusted), and escalated only on genuine capability failures — under a hard retry budget so costs can't spiral.
+**Multi-agent orchestration for coding agents.** Your frontier model plans, routes, and verifies; cheap workers do the volume. Every unit of work is routed to the cheapest model that can reliably do it, checked by evidence-gated verification (a sub-agent's "done!" is never trusted), and escalated only on genuine capability failures — under a hard retry budget so costs can't spiral.
+
+Ships as a first-class **[Claude Code](https://claude.com/claude-code) plugin**, plus a **[portable edition](portable/orchestrator.md)** for every other agent — OpenAI Codex CLI, opencode, Cursor, Gemini CLI, GitHub Copilot, Aider, and anything else that reads repo instructions. See [Using it outside Claude Code](#using-it-outside-claude-code).
 
 ---
 
@@ -178,6 +180,28 @@ Trivial turns and single-file fixes: work directly, no orchestration.
 ```
 
 `CLAUDE.md` is read at the start of every session, so this makes activation near-deterministic instead of relying on description matching alone.
+
+## Using it outside Claude Code
+
+The protocol is model- and agent-agnostic; only the plumbing (pinned sub-agent models, effort frontmatter, `/orchestrate`) is Claude Code-specific. The **[portable edition](portable/orchestrator.md)** expresses routing as capability tiers (T0–T3) you map onto any provider's lineup, and includes fallbacks for agents missing primitives (no nested sub-agents, no per-dispatch model choice, no parallelism).
+
+| Agent | Where to put it |
+|---|---|
+| **OpenAI Codex CLI** | Paste [`portable/orchestrator.md`](portable/orchestrator.md) into `AGENTS.md` in your repo root |
+| **opencode** | `AGENTS.md`; optionally register the appendix role prompts as custom agents in `.opencode/agent/` |
+| **Cursor** | `.cursor/rules/orchestrator.mdc` (or `AGENTS.md` in recent versions) |
+| **Gemini CLI** | `GEMINI.md` |
+| **GitHub Copilot** (agent mode) | `.github/copilot-instructions.md` |
+| **Aider** | `CONVENTIONS.md` |
+| **Anything else** | Wherever your agent reads repo-level instructions |
+
+What degrades gracefully: agents without nested sub-agents run the foreman loop themselves; agents without per-dispatch model selection keep the tier discipline as a *reasoning-depth* discipline; agents without parallelism execute units sequentially, cheap fan-out first. The core — decompose → machine-checkable done-criteria → evidence gates → failure triage → hard retry budget — survives everywhere.
+
+## Security
+
+- **No secrets, by design:** the repo contains only prompts and manifests — no credentials, endpoints, or tokens, and the protocol never asks agents to handle them.
+- **[gitleaks](https://github.com/gitleaks/gitleaks) CI** scans the full git history on every push and PR ([workflow](.github/workflows/gitleaks.yml)).
+- **GitHub secret scanning + push protection** are enabled on this repo, so a leaked credential blocks the push before it lands.
 
 ## Runtime artifacts
 
