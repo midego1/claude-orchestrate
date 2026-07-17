@@ -2,7 +2,7 @@
 # Update notifier for the orchestrate plugin.
 #
 # Runs on SessionStart (matcher: startup). Compares the installed plugin
-# version against the repo's main branch, at most once per 24h, and — when
+# version against the repo's main branch, at most once per hour, and — when
 # a newer version exists — emits a notice with the changelog's "Why update"
 # line and the exact update command.
 #
@@ -17,7 +17,7 @@ PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "$0")/.." 2>/dev/null && pwd)
 [ -n "$PLUGIN_ROOT" ] || exit 0
 command -v curl >/dev/null 2>&1 || exit 0
 
-# Rate limit: at most one remote check per 24h.
+# Rate limit: at most one remote check per hour.
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/claude-orchestrate"
 mkdir -p "$CACHE_DIR" 2>/dev/null || exit 0
 STAMP="$CACHE_DIR/last-update-check"
@@ -25,7 +25,7 @@ NOW=$(date +%s)
 if [ -f "$STAMP" ]; then
   LAST=$(cat "$STAMP" 2>/dev/null || echo 0)
   case "$LAST" in (*[!0-9]*) LAST=0;; esac
-  [ $((NOW - LAST)) -lt 86400 ] && exit 0
+  [ $((NOW - LAST)) -lt 3600 ] && exit 0
 fi
 echo "$NOW" > "$STAMP" 2>/dev/null || true
 

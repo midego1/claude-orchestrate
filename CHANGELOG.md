@@ -2,6 +2,12 @@
 
 All notable changes to the orchestrate plugin. The update notifier reads this file — keep the **Why update** line on every release.
 
+## [0.4.1] — 2026-07-17
+
+- Update notifier now checks at most once per **hour** (was 24h) — releases can land daily or faster, and one silent hour is a better trade than a silent day
+
+**Why update:** you hear about new releases within the hour instead of within the day.
+
 ## [0.4.0] — 2026-07-17
 
 Contract-precision release: every P1 from an adversarial cross-model review (OpenAI Codex, 29 findings) fixed, plus an opt-in update notifier.
