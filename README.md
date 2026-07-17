@@ -1,6 +1,6 @@
 # claude-orchestrate
 
-**Multi-agent orchestration for coding agents.** Your frontier model plans, routes, and verifies; cheap workers do the volume. Every unit of work is routed to the cheapest model that can reliably do it, checked by evidence-gated verification (a sub-agent's "done!" is never trusted), and escalated only on genuine capability failures — under a hard retry budget so costs can't spiral.
+**Multi-agent orchestration for coding agents.** Your frontier model plans, routes, and verifies; cheap workers do the volume. Every unit of work is routed to the cheapest model that can reliably do it, checked by evidence-gated verification (a sub-agent's "done!" is never trusted), and escalated only on genuine capability failures — under hard per-unit retry budgets and a global dispatch cap.
 
 Ships as a first-class **[Claude Code](https://claude.com/claude-code) plugin**, plus a **[portable edition](portable/orchestrator.md)** for every other agent — OpenAI Codex (ChatGPT app, CLI, IDE, web), opencode, Cursor, Gemini CLI, GitHub Copilot, Aider, and anything else that reads repo instructions. See [Using it outside Claude Code](#using-it-outside-claude-code).
 
@@ -36,7 +36,7 @@ Start a **new session** (plugins load at session start) and verify the `orchestr
 
 **Manual copy** — copy `skills/orchestrate/` into your repo's `.claude/skills/` and `agents/*.md` into `.claude/agents/`.
 
-**Recommended: activation nudge in CLAUDE.md** — skill triggering is description-based; this one-liner makes it near-deterministic (`CLAUDE.md` is read at the start of every session):
+**Recommended: activation nudge in CLAUDE.md** — skill triggering is model behavior (description-based), not a hard guarantee; this one-liner makes it far more reliable (`CLAUDE.md` is read at the start of every session):
 
 ```markdown
 ## Orchestration
@@ -68,7 +68,7 @@ It deliberately stays **out of the way** on trivial turns — single-file fixes,
 
 e.g. `/orchestrate migrate all 40 API routes to the new error-handling pattern`
 
-> **Tip — make auto-activation near-deterministic:** skill triggering is description-based. Add a one-line rule to your repo's `CLAUDE.md` (see [Install](#-install)) and the orchestrator fires reliably on every substantive task.
+> **Tip — make auto-activation far more reliable:** skill triggering is model behavior (description-based), not enforced by the manifest. Add a one-line rule to your repo's `CLAUDE.md` (see [Install](#-install)) and the orchestrator fires consistently on substantive tasks. Guaranteed activation is always one `/orchestrate` away.
 
 ## 🎛️ Ideal setup: which model to select in Claude Code
 
@@ -77,10 +77,23 @@ The model you select in Claude Code **is the orchestrator** — it does the deco
 | Setting | Recommended | Why |
 |---|---|---|
 | **Session model** | **Fable 5** (`/model claude-fable-5`) | The orchestrator's whole job is judgment: decomposition quality determines everything downstream. A bad plan at the top causes escalation cascades below. |
-| **Reasoning effort** | **`xhigh`** — or **`ultracode`** in the effort menu | Deep reasoning over a deliberately *small* token surface — the orchestrator never reads files or raw logs, so you pay frontier prices only for planning. [`ultracode`](https://code.claude.com/docs/en/workflows) runs at `xhigh` *and* grants standing permission for Claude Code's native multi-agent workflows — a natural pairing with this protocol. Not `max`: that's prone to overthinking on repeated routine routing decisions. |
+| **Reasoning effort** | **`xhigh`** — labeled **"Extra"** in the desktop app's effort menu | Deep reasoning over a deliberately *small* token surface — the orchestrator never reads files or raw logs, so you pay frontier prices only for planning. See [Which effort, when?](#which-effort-when) for `xhigh` vs `ultracode` vs `max`. |
 | **Claude Code version** | **≥ 2.1.172** | Nested sub-agents: the foreman must dispatch workers of its own. |
 
 Running Opus or Sonnet as the session model works too — the protocol is model-agnostic — but plan quality, and therefore total cost, degrades: weaker decomposition means more retries and escalations below.
+
+### Which effort, when?
+
+Naming differs per surface: the CLI and settings call it `xhigh`; the **desktop app's effort menu labels it "Extra"**. Same thing. `max` and `ultracode` are session-only — they can't be set persistently in `settings.json`, so pick them per session.
+
+| Setting | What it is | Pick it when |
+|---|---|---|
+| `high` (default) | Balanced reasoning | Everyday single-focus work; you're not orchestrating |
+| `xhigh` / **"Extra"** | Deeper reasoning, higher token spend | **Orchestrator sessions with this plugin** — decomposition, routing, and triage are pure judgment over a small token surface. Also: unknown-root-cause debugging, design trade-offs, security review |
+| [`ultracode`](https://code.claude.com/docs/en/workflows) | `xhigh` **plus** standing permission for Claude Code's native multi-agent workflows (Claude Code ≥ 2.1.203, session-only) | You want fan-out on *every* substantive task without being asked each time — audit days, migration sweeps, "be exhaustive" work. Composes with this plugin: ultracode supplies the engine, the protocol supplies the discipline. Heaviest spend of the menu |
+| `max` | Absolute maximum, no token constraints | Rarely — one hardest problem, single dispatch. Prone to overthinking; never for routine work or as a session default |
+
+Rule of thumb: **`xhigh`/Extra is the sweet spot for this plugin.** Step up to `ultracode` for a session when you know the whole day is substantive multi-unit work; step down to `high` when you're just chatting with the codebase.
 
 ---
 
@@ -90,7 +103,7 @@ Given a substantive task, the orchestrator:
 
 1. **Decomposes** it into independent units, each with explicit inputs, outputs, and machine-checkable done-criteria.
 2. **Classifies** each unit into a complexity tier (T0–T3) and announces the routing plan as one compact table — before spending anything.
-3. **Hands execution to a foreman** (an Opus sub-agent) that dispatches workers in parallel, runs verification gates, triages failures, and manages retries — without the expensive top model in the loop.
+3. **Hands execution to a foreman** (an Opus sub-agent) that dispatches workers in parallel, runs verification gates, triages failures, and manages retries — without the expensive top model in the loop. (Plans of ≤3 units skip the foreman; the orchestrator runs the loop and the gates itself.)
 4. **Verifies everything through gates.** Mechanical checks first (tests, builds, grep invariants — free), then cheap verifier agents that must cite evidence. A verdict without evidence is a FAIL.
 5. **Escalates only real capability failures** — after triage rules out bad specs and broken environments — one tier at a time, capped at 2 attempts + 1 escalation per unit.
 6. **Integrates** gate-passed results, checks cross-unit consistency, runs a final **ship gate** — automated code review plus security review over the integrated diff — and ships.
@@ -144,7 +157,7 @@ flowchart TB
 
 Hard cap: **2 attempts + 1 escalation per unit**, then the unit is surfaced to you with its full failure history. No escalation ladders, ever.
 
-**2. Evidence-gated verification.** No sub-agent's self-report of success is ever trusted. Verifiers must return PASS/FAIL *per criterion* with cited evidence — specific test output, line numbers, diff hunks. "Looks correct" is a FAIL. The deep verifier additionally reasons about what is **missing** relative to the spec: unhandled edge cases, symptom patches masquerading as root-cause fixes, semantically inequivalent rewrites.
+**2. Evidence-gated verification.** No sub-agent's self-report of success is ever trusted — and that includes summaries: every PASS travels with a reference to its evidence (the command + exit code, or where the verdict lives), archived per run under `.claude/orchestrate-runs/`. Verifiers must return PASS/FAIL *per criterion* with cited evidence — specific test output, line numbers, diff hunks. "Looks correct" is a FAIL. The deep verifier additionally reports what is **missing** relative to the spec (dedicated `MISSING` lines): unhandled edge cases, symptom patches masquerading as root-cause fixes, semantically inequivalent rewrites.
 
 **3. Orchestrator token conservation.** Everything the top model reads stays in its context and is re-processed every subsequent turn. So the orchestrator never reads files (readers summarize instead — haiku for targeted extraction, sonnet for open-ended comprehension), every dispatch caps its return size, failure histories arrive compressed, and planning happens in one pass rather than dispatch-look-dispatch loops.
 
@@ -183,7 +196,8 @@ Effort is a second, cheaper lever than model choice — Sonnet at `xhigh` often 
 | [`skills/orchestrate`](skills/orchestrate/SKILL.md) | (loads into your session) | The full protocol: decomposition, routing tables, gates, triage rules, dispatch contract, budget discipline |
 | [`agents/foreman`](agents/foreman.md) | opus @ high | Execution manager: dispatch loop, gates, triage, retries, escalation ledger |
 | [`agents/verifier-fast`](agents/verifier-fast.md) | haiku | Gate 2: PASS/FAIL per done-criterion, evidence required |
-| [`agents/verifier-deep`](agents/verifier-deep.md) | sonnet @ xhigh | Gate 2 for judgment calls: also reasons about what's *missing* vs. the spec |
+| [`agents/verifier-deep`](agents/verifier-deep.md) | sonnet @ xhigh | Gate 2 for judgment calls: also reports what's *missing* vs. the spec (`MISSING` lines) |
+| [`scripts/check-update.sh`](scripts/check-update.sh) + [`hooks/hooks.json`](hooks/hooks.json) | (shell, SessionStart) | Update notifier: tells you when a newer version exists and why it matters — never installs anything ([details](#updates)) |
 
 ## Where this fits
 
@@ -209,19 +223,25 @@ What degrades gracefully: agents without nested sub-agents run the foreman loop 
 
 ## Security
 
-- **No secrets, by design:** the repo contains only prompts and manifests — no credentials, endpoints, or tokens, and the protocol never asks agents to handle them.
+- **No secrets, by design:** the repo contains only prompts, manifests, and one read-only shell script — no credentials, endpoints, or tokens. The protocol never asks an agent to expose or exfiltrate credential values; code that touches them is routed up-tier and ship-gated instead.
 - **[gitleaks](https://github.com/gitleaks/gitleaks) CI** scans the full git history on every push and PR ([workflow](.github/workflows/gitleaks.yml)).
 - **GitHub secret scanning + push protection** are enabled on this repo, so a leaked credential blocks the push before it lands.
 
+## Updates
+
+**The plugin never updates itself.** Two layers, both under your control:
+
+1. **Claude Code's built-in mechanism**: third-party marketplaces default to auto-update *disabled* — you update explicitly via `/plugin` → Manage (or `claude plugin update orchestrate@claude-orchestrate`, then `/reload-plugins`). You can opt into auto-update per marketplace in `/plugin` → Marketplaces if you prefer.
+2. **The update notifier** ([`scripts/check-update.sh`](scripts/check-update.sh), wired to a `SessionStart` hook): at most once per 24h it compares your installed version against this repo and, when a newer release exists, prints a notice with the version jump, the changelog's **"Why update"** line for that release, a link to the [full changelog](CHANGELOG.md), and the exact update command. It is read-only and fail-silent — no network, no notice, no breakage. It never installs anything.
+
+Every release in [CHANGELOG.md](CHANGELOG.md) carries a one-line *Why update* so you can decide in five seconds whether it matters to you.
+
 ## Runtime artifacts
 
-The foreman appends every escalated or surfaced unit to `.claude/escalation-ledger.md` in **your** repo (created on first use):
+Two artifacts appear in **your** repo when orchestrating:
 
-```
-unit | initial tier | failure type | final tier | outcome
-```
-
-This ledger is the system's feedback loop: it shows where the routing table is mis-calibrated. If more than a third of units escalate in a session, the decomposition or the specs are the problem — not the models.
+- **`.claude/escalation-ledger.md`** — every escalated or surfaced unit (`unit | initial tier | failure type | final tier | outcome`), created on first use. This is the system's feedback loop: it shows where the routing table is mis-calibrated. If more than a third of units escalate in a session, the decomposition or the specs are the problem — not the models.
+- **`.claude/orchestrate-runs/<timestamp>/`** — the run archive: raw worker logs, gate outputs, and failure histories land here, referenced (not inlined) in what flows back to the orchestrator. This is how PASS lines stay one-line *and* auditable. Gitignore it if you don't want run logs in history.
 
 ## FAQ
 
