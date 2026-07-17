@@ -15,6 +15,8 @@ In Claude Code, run:
 
 Start a **new session** (plugins load at session start) and verify the `orchestrate` skill and the `foreman` / `verifier-fast` / `verifier-deep` agents appear. Then set up the [ideal model configuration](#%EF%B8%8F-ideal-setup-which-model-to-select-in-claude-code) and try it: `/orchestrate <a substantive task>`.
 
+> This repo is itself a [plugin marketplace](https://code.claude.com/docs/en/plugin-marketplaces) — Claude Code's plugin system is decentralized, so the two commands above are all anyone needs. No central registry involved.
+
 **Team-wide, per repo** — add to your repo's `.claude/settings.json` so everyone gets it automatically:
 
 ```json
@@ -73,7 +75,7 @@ The model you select in Claude Code **is the orchestrator** — it does the deco
 | Setting | Recommended | Why |
 |---|---|---|
 | **Session model** | **Fable 5** (`/model claude-fable-5`) | The orchestrator's whole job is judgment: decomposition quality determines everything downstream. A bad plan at the top causes escalation cascades below. |
-| **Reasoning effort** | **`xhigh`** | Deep reasoning over a deliberately *small* token surface — the orchestrator never reads files or raw logs, so you pay frontier prices only for planning. Not `max`: that's prone to overthinking on repeated routine routing decisions. |
+| **Reasoning effort** | **`xhigh`** — or **`ultracode`** in the effort menu | Deep reasoning over a deliberately *small* token surface — the orchestrator never reads files or raw logs, so you pay frontier prices only for planning. [`ultracode`](https://code.claude.com/docs/en/workflows) runs at `xhigh` *and* grants standing permission for Claude Code's native multi-agent workflows — a natural pairing with this protocol. Not `max`: that's prone to overthinking on repeated routine routing decisions. |
 | **Claude Code version** | **≥ 2.1.172** | Nested sub-agents: the foreman must dispatch workers of its own. |
 
 Running Opus or Sonnet as the session model works too — the protocol is model-agnostic — but plan quality, and therefore total cost, degrades: weaker decomposition means more retries and escalations below.
@@ -95,35 +97,37 @@ The net effect: frontier-quality output at a fraction of frontier cost, with fai
 
 ## How it works
 
-```
-  YOU select the session model  ──►  ORCHESTRATOR (Fable 5 @ xhigh)
-                                      plans · routes · escalates · integrates
-                                      never reads files or raw output directly
-                                          │
-                                          │  full dispatch plan (units, tiers, criteria)
-                                          ▼
-                                     FOREMAN (opus @ high)
-                                      dispatch loop · failure triage · retries
-                                          │
-              ┌───────────────────────────┼───────────────────────────┐
-              ▼                           ▼                           ▼
-        worker (haiku)             worker (sonnet)              worker (opus)
-        T0: lookups, fan-out,      T1: implementation           T2: cross-file
-        boilerplate, exact-        from a clear spec,           refactors, root-cause
-        spec edits                 tests, docs                  hunts, security code
-              │                           │                           │
-              └───────────────────────────┼───────────────────────────┘
-                                          ▼
-                            GATE 1 · mechanical (bash, ~free)
-                            tests pass · build clean · diff in scope
-                                          ▼
-                            GATE 2 · evidence-cited review
-                            verifier-fast (haiku): criteria comparison
-                            verifier-deep (sonnet @ xhigh): what's MISSING
-                                          ▼
-                            GATE 3 · orchestrator
-                            cross-unit consistency only —
-                            one line per unit, evidence attached only on FAIL
+```mermaid
+flowchart TB
+    YOU(["👤 <b>You</b><br/>session model = the orchestrator"])
+
+    subgraph PLAN["&nbsp;🧠 PLAN — frontier tokens, deliberately tiny surface&nbsp;"]
+        O["<b>Orchestrator</b> — Fable 5 @ xhigh<br/>decompose → classify → route<br/><i>never reads files or raw output directly</i>"]
+    end
+
+    subgraph EXEC["&nbsp;⚙️ EXECUTE — cheap volume, parallel where independent&nbsp;"]
+        F["<b>Foreman</b> — opus @ high<br/>dispatch loop · failure triage · retry budget 2+1"]
+        W0["<b>T0 — haiku</b><br/>lookups · fan-out reads<br/>boilerplate · exact-spec edits"]
+        W1["<b>T1 — sonnet</b><br/>spec'd implementation<br/>tests · docs · small refactors"]
+        W2["<b>T2 — opus</b><br/>cross-file refactors · root-cause<br/>security-sensitive code"]
+        F --> W0 & W1 & W2
+    end
+
+    subgraph VERIFY["&nbsp;✅ VERIFY — evidence or it didn't happen&nbsp;"]
+        G1{{"<b>Gate 1 — mechanical, ~free</b><br/>tests pass · build clean · diff in scope"}}
+        G2{{"<b>Gate 2 — cited evidence required</b><br/>verifier-fast (haiku): criteria comparison<br/>verifier-deep (sonnet @ xhigh): what's <i>missing</i>"}}
+    end
+
+    G3["<b>Gate 3 — orchestrator</b><br/>cross-unit consistency only<br/>one line per unit · evidence attached only on FAIL"]
+
+    YOU -->|"substantive task"| O
+    O -->|"full dispatch plan<br/>(units · tiers · done-criteria)"| F
+    W0 & W1 & W2 --> G1
+    G1 -->|"not mechanically<br/>checkable"| G2
+    G1 --> G3
+    G2 --> G3
+    G2 -. "FAIL → triage:<br/>spec? env? capability?<br/>retry / escalate one tier" .-> F
+    G3 -->|"integrated result"| YOU
 ```
 
 ### The three ideas that carry the design
@@ -224,6 +228,9 @@ Yes — any session model works. You lose orchestration judgment quality, which 
 
 **Why is the orchestrator forbidden from reading files?**
 Its context compounds: everything it reads is re-processed on every later turn of the session. Readers return scoped summaries instead, so frontier tokens are spent on judgment, not on I/O.
+
+**How does this relate to Claude Code's built-in `ultracode` mode?**
+They compose. [`ultracode`](https://code.claude.com/docs/en/workflows) (the keyword, or `/effort ultracode` for a session) is native Claude Code machinery: it runs at `xhigh` effort and grants standing permission to launch multi-agent workflows — the *fan-out engine*. It doesn't prescribe *how* to spend that fan-out. This plugin supplies the discipline on top: cost-tiered model routing, evidence-gated verification, failure triage, and a hard retry budget. (Related but different: [`ultrathink`](https://code.claude.com/docs/en/model-config#adjust-effort-level) is a prompt keyword for one-off deeper reasoning on a single turn — the dispatch contract in this protocol uses it to request depth on individual sub-agent dispatches.)
 
 ## License
 
