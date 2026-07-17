@@ -17,6 +17,8 @@ Start a **new session** (plugins load at session start) and verify the `orchestr
 
 > This repo is itself a [plugin marketplace](https://code.claude.com/docs/en/plugin-marketplaces) — Claude Code's plugin system is decentralized, so the two commands above are all anyone needs. No central registry involved.
 
+> **Ops tip:** pre-approve your test/build/lint commands (and safe MCP tools) in `.claude/settings.json` permissions. Gate 1 runs them constantly — permission prompts are what stall an otherwise autonomous loop.
+
 **Team-wide, per repo** — add to your repo's `.claude/settings.json` so everyone gets it automatically:
 
 ```json
@@ -91,7 +93,7 @@ Given a substantive task, the orchestrator:
 3. **Hands execution to a foreman** (an Opus sub-agent) that dispatches workers in parallel, runs verification gates, triages failures, and manages retries — without the expensive top model in the loop.
 4. **Verifies everything through gates.** Mechanical checks first (tests, builds, grep invariants — free), then cheap verifier agents that must cite evidence. A verdict without evidence is a FAIL.
 5. **Escalates only real capability failures** — after triage rules out bad specs and broken environments — one tier at a time, capped at 2 attempts + 1 escalation per unit.
-6. **Integrates** gate-passed results, checks cross-unit consistency, and ships.
+6. **Integrates** gate-passed results, checks cross-unit consistency, runs a final **ship gate** — automated code review plus security review over the integrated diff — and ships.
 
 The net effect: frontier-quality output at a fraction of frontier cost, with failure containment built in.
 
@@ -118,7 +120,7 @@ flowchart TB
         G2{{"<b>Gate 2 — cited evidence required</b><br/>verifier-fast (haiku): criteria comparison<br/>verifier-deep (sonnet @ xhigh): what's <i>missing</i>"}}
     end
 
-    G3["<b>Gate 3 — orchestrator</b><br/>cross-unit consistency only<br/>one line per unit · evidence attached only on FAIL"]
+    G3["<b>Gate 3 — orchestrator</b><br/>cross-unit consistency · one line per unit<br/><b>ship gate:</b> code + security review of the integrated diff"]
 
     YOU -->|"substantive task"| O
     O -->|"full dispatch plan<br/>(units · tiers · done-criteria)"| F
@@ -182,6 +184,10 @@ Effort is a second, cheaper lever than model choice — Sonnet at `xhigh` often 
 | [`agents/foreman`](agents/foreman.md) | opus @ high | Execution manager: dispatch loop, gates, triage, retries, escalation ledger |
 | [`agents/verifier-fast`](agents/verifier-fast.md) | haiku | Gate 2: PASS/FAIL per done-criterion, evidence required |
 | [`agents/verifier-deep`](agents/verifier-deep.md) | sonnet @ xhigh | Gate 2 for judgment calls: also reasons about what's *missing* vs. the spec |
+
+## Where this fits
+
+On the AI-adoption curve (cf. Boris Cherny's *Steps of AI Adoption*): step 1 is you pair-programming with one agent; step 2 is one engineer orchestrating ~10 parallel agents; step 3 is supervised autonomy — a *manager of managers*, where Claude kicks off Claude. This plugin is the **step 2 → 3 bridge**: the foreman pattern *is* "let Claude kick off Claude", wrapped in the discipline — tiered routing, evidence gates, failure triage, hard budgets — that makes a deeper agent tree trustworthy. Trust in the loop is the exact bottleneck that stalls teams between those steps.
 
 ## Using it outside Claude Code
 
