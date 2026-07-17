@@ -105,7 +105,7 @@ Given a substantive task, the orchestrator:
 2. **Classifies** each unit into a complexity tier (T0–T3) and announces the routing plan as one compact table — before spending anything.
 3. **Hands execution to a foreman** (an Opus sub-agent) that dispatches workers in parallel, runs verification gates, triages failures, and manages retries — without the expensive top model in the loop. (Plans of ≤3 units skip the foreman; the orchestrator runs the loop and the gates itself.)
 4. **Verifies everything through gates.** Mechanical checks first (tests, builds, grep invariants — free), then cheap verifier agents that must cite evidence. A verdict without evidence is a FAIL.
-5. **Escalates only real capability failures** — after triage rules out bad specs and broken environments — one tier at a time, capped at 2 attempts + 1 escalation per unit.
+5. **Escalates only real capability failures** — after triage rules out bad specs and broken environments — one step at a time (effort before model), capped at 3 dispatches per unit and a global dispatch cap for the plan.
 6. **Integrates** gate-passed results, checks cross-unit consistency, runs a final **ship gate** — automated code review plus security review over the integrated diff — and ships.
 
 The net effect: frontier-quality output at a fraction of frontier cost, with failure containment built in.
@@ -120,8 +120,8 @@ flowchart TB
         O["<b>Orchestrator</b> — Fable 5 @ xhigh<br/>decompose → classify → route<br/><i>never reads files or raw output directly</i>"]
     end
 
-    subgraph EXEC["&nbsp;⚙️ EXECUTE — cheap volume, parallel where independent&nbsp;"]
-        F["<b>Foreman</b> — opus @ high<br/>dispatch loop · failure triage · retry budget 2+1"]
+    subgraph EXEC["&nbsp;⚙️ EXECUTE — cheap volume, parallel in isolated worktrees&nbsp;"]
+        F["<b>Foreman</b> — opus @ high<br/>dispatch loop · failure triage<br/>max 3 dispatches per unit · baseline commit recorded"]
         W0["<b>T0 — haiku</b><br/>lookups · fan-out reads<br/>boilerplate · exact-spec edits"]
         W1["<b>T1 — sonnet</b><br/>spec'd implementation<br/>tests · docs · small refactors"]
         W2["<b>T2 — opus</b><br/>cross-file refactors · root-cause<br/>security-sensitive code"]
@@ -129,21 +129,27 @@ flowchart TB
     end
 
     subgraph VERIFY["&nbsp;✅ VERIFY — evidence or it didn't happen&nbsp;"]
-        G1{{"<b>Gate 1 — mechanical, ~free</b><br/>tests pass · build clean · diff in scope"}}
-        G2{{"<b>Gate 2 — cited evidence required</b><br/>verifier-fast (haiku): criteria comparison<br/>verifier-deep (sonnet @ xhigh): what's <i>missing</i>"}}
+        G1{{"<b>Gate 1 — mechanical, ~free</b><br/>tests · build · lint · e2e · diff vs baseline"}}
+        G2{{"<b>Gate 2 — cited evidence required</b><br/>verifier-fast (haiku): criteria comparison<br/>verifier-deep (sonnet @ xhigh): MISSING defects too"}}
+        MERGE["<b>Integrate</b><br/>merge passed units back sequentially<br/>Gate 1 re-run after each merge"]
     end
 
-    G3["<b>Gate 3 — orchestrator</b><br/>cross-unit consistency · one line per unit<br/><b>ship gate:</b> code + security review of the integrated diff"]
+    G3["<b>Gate 3 — orchestrator</b><br/>cross-unit consistency · PASS + evidence ref per unit<br/><b>ship gate:</b> code + security review of the integrated diff<br/>(one fix round, then surface)"]
+    AR[("run archive<br/>.claude/orchestrate-runs/<br/>raw logs · failure histories")]
 
     YOU -->|"substantive task"| O
-    O -->|"full dispatch plan<br/>(units · tiers · done-criteria)"| F
-    W0 & W1 & W2 --> G1
+    O -->|"dispatch plan + global cap<br/>(units · tiers · done-criteria)"| F
+    W0 & W1 & W2 -->|"commit + branch/SHA"| G1
     G1 -->|"not mechanically<br/>checkable"| G2
-    G1 --> G3
-    G2 --> G3
-    G2 -. "FAIL → triage:<br/>spec? env? capability?<br/>retry / escalate one tier" .-> F
-    G3 -->|"integrated result"| YOU
+    G1 --> MERGE
+    G2 --> MERGE
+    G2 -. "FAIL → triage: spec? env? capability?<br/>reset to baseline · retry / escalate one step" .-> F
+    F -.->|"raw logs, referenced not inlined"| AR
+    MERGE --> G3
+    G3 -->|"integrated result:<br/>what shipped · what's parked"| YOU
 ```
+
+*Plans of ≤3 units skip the foreman — the orchestrator dispatches and runs the gates itself. Everything else in the picture is unchanged.*
 
 ### The three ideas that carry the design
 
@@ -155,7 +161,7 @@ flowchart TB
 | **Environment failure** | Flaky test, missing dep, wrong branch, stale state | Fix the environment, retry same tier |
 | **Capability failure** | Spec was correct and complete; the model genuinely couldn't do it | Escalate **one** tier (effort first, then model), passing the failed attempt along |
 
-Hard cap: **2 attempts + 1 escalation per unit**, then the unit is surfaced to you with its full failure history. No escalation ladders, ever.
+Hard cap: **at most 3 dispatches per unit** — the original, one same-tier retry, one escalated attempt — under a **global dispatch cap** for the whole plan (default 3× unit count). After that the unit is surfaced with a reference to its archived failure history; independent passed units still ship. No escalation ladders, ever.
 
 **2. Evidence-gated verification.** No sub-agent's self-report of success is ever trusted — and that includes summaries: every PASS travels with a reference to its evidence (the command + exit code, or where the verdict lives), archived per run under `.claude/orchestrate-runs/`. Verifiers must return PASS/FAIL *per criterion* with cited evidence — specific test output, line numbers, diff hunks. "Looks correct" is a FAIL. The deep verifier additionally reports what is **missing** relative to the spec (dedicated `MISSING` lines): unhandled edge cases, symptom patches masquerading as root-cause fixes, semantically inequivalent rewrites.
 
