@@ -20,18 +20,19 @@ When orchestrating, you are the **orchestrator**: decompose work, dispatch sub-t
 
 1. **Decompose** the task into independent units with explicit inputs, outputs, and done-criteria.
 2. **Classify** each unit by capability tier (table below) and announce the routing plan as one compact table before dispatching. No prose justification per unit.
-3. **Dispatch** units through your agent's sub-task mechanism (sub-agents, background tasks, parallel tool calls — whatever is available; see *Capability fallbacks*). Run independent units in parallel where supported; serialize only true dependencies. **Parallelism caveat:** parallel execution is free for read-only work. Prefer giving file-mutating workers **isolated worktrees** so they run in parallel without colliding; when isolation isn't available, serialize them — workers sharing a working tree fight over lockfiles, build caches, and dev-server ports.
+3. **Dispatch** units through your agent's sub-task mechanism (sub-agents, background tasks, parallel tool calls — whatever is available; see *Capability fallbacks*). Run independent units in parallel where supported; serialize only true dependencies. **Parallelism caveat:** parallel execution is free for read-only work. Prefer giving file-mutating workers **isolated worktrees** so they run in parallel without colliding; when isolation isn't available, serialize them — workers sharing a working tree fight over lockfiles, build caches, and dev-server ports. **Integration protocol:** record each unit's baseline commit at dispatch; isolated workers commit their work and return branch + commit SHA. Merge passed units back sequentially, re-running Gate 1 after each merge; diff-scope checks measure against the recorded baseline, and a failed attempt's changes are reset to baseline before any retry.
 4. **Verify tiered** — never accept work unchecked:
    - **Gate 1 (mechanical, ~free):** make done-criteria machine-checkable wherever possible — a passing test, a clean build, a clean lint run, a grep-checkable invariant, a diff limited to declared files, and where the change has runtime surface, an end-to-end check against a real dev environment. Run these as shell commands.
    - **Gate 2 (cheap review):** for output that can't be mechanically checked, run a verification pass one tier below the producer (floor at T0). Security- or correctness-critical output gets T1 minimum. The verifier must return PASS/FAIL per criterion with **cited evidence** — test output, line numbers, diff hunks. A verdict without evidence is a FAIL. Judgment about what's *missing* (root cause vs. symptom, semantic equivalence, edge-case coverage) needs T1+, not T0.
-   - **Gate 3 (you):** check cross-unit consistency and integration, not unit-level correctness. Consume one-line gate results; read evidence only on FAIL.
-   - **Ship gate:** before declaring the task done, run an automated review over the **integrated diff** — a code-review pass, plus a security pass for anything touching auth, input handling, secrets, or infrastructure (T1+ reviewer, deep reasoning). Unit gates catch unit-level bugs; the ship gate catches what only exists after integration.
-   - Never trust a sub-task's self-report of success. A claim of success without gate evidence is a FAIL.
+   - **Gate 3 (you):** check cross-unit consistency and integration, not unit-level correctness. Consume one-line gate results **with evidence references** (command + exit code, or where the verdict lives); archive full logs and failure histories to files and pass references — read evidence bodies only on FAIL.
+   - **Ship gate:** before declaring the task done, run an automated review over the **integrated diff** — a code-review pass, plus a security pass for anything touching auth, input handling, secrets, or infrastructure (T1+ reviewer, deep reasoning). Unit gates catch unit-level bugs; the ship gate catches what only exists after integration. Ship-gate findings get **one fix round** and one re-review; anything still failing is surfaced to the user — never a fix/review loop.
+   - Never trust a sub-task's self-report of success. A claim of success without a gate-evidence reference is a FAIL.
 5. **Triage failures before escalating** — most failures are not capability failures:
    - **Spec failure** (ambiguous done-criteria, missing context, wrong assumptions) → rewrite the dispatch, retry at the **same** tier. Escalating a bad spec buys an expensive wrong answer.
-   - **Environment failure** (flaky test, missing dep, wrong branch, stale state) → fix the environment, retry same tier.
-   - **Capability failure** (spec was correct and complete, the model genuinely couldn't do it) → escalate one tier up (reasoning depth first, then model), including the failed attempt and failure reason in the new dispatch.
-6. **Retry budget:** hard cap of 2 attempts + 1 escalation per unit. After that, stop and surface the unit to the user with the full failure history. Never enter an escalation ladder.
+   - **Environment failure** (flaky test, missing dep, wrong branch, stale state, merge conflict, timeout, permissions) → fix the environment, retry same tier. Unclear cases default here — environment retries are cheapest.
+   - **Capability failure** (spec was correct and complete, the model genuinely couldn't do it) → escalate one step (reasoning depth first if there's headroom, then model), including the failed attempt and failure reason in the new dispatch.
+   - **How to tell:** reread the dispatch first — if a competent human would need a clarifying question, it's spec. If the same check fails without the worker's change, it's environment. Only with an unambiguous spec and a clean environment is it capability.
+6. **Retry budget:** an *attempt* is one worker dispatch. Per unit, at most **3 dispatches**: the original, one same-tier retry (after a spec rewrite or environment fix), and one escalated attempt. A unit already at the top tier and depth is surfaced, not escalated. Re-decomposing a surfaced unit grants a fresh budget **once**. After the budget: stop and surface the unit with its archived failure history. A surfaced unit parks only itself and its dependents — independent gate-passed units still ship; report what shipped and what's parked. Never enter an escalation ladder.
 
 ## Capability tiers & model routing
 
@@ -43,6 +44,8 @@ Route each unit to the cheapest tier that can reliably do it. Map tiers to your 
 | **T1 — Standard** | Balanced default | Sonnet | your provider's standard workhorse |
 | **T2 — Complex** | Strongest general model | Opus | top general model |
 | **T3 — Frontier** | Deepest reasoning flagship | Fable | deepest reasoning tier, highest thinking budget |
+
+**Honesty check:** cost-tiered routing requires per-dispatch model selection. If your agent can't pick a model per sub-task, every worker costs the same — the tier column then degrades to the *depth* discipline below (shallow reasoning for T0-class work, deep only for T2+-class), and you should say so rather than pretend the routing saves money. The gates, triage, and budgets still apply in full.
 
 **What runs where:**
 
@@ -78,8 +81,8 @@ Prefer bumping depth before bumping model — a T1 model at deep reasoning often
 Every sub-task prompt contains, in this order:
 
 1. **Objective** — one sentence, the outcome, not the steps.
-2. **Context** — only what's needed: relevant file paths, constraints, conventions. Sub-tasks share nothing with you or each other; over-include rather than assume.
-3. **Done-criteria** — machine-checkable wherever possible (exact test command, invariant, expected diff scope). If you can't state a checkable done-criterion, the unit is under-specified — re-decompose.
+2. **Context** — only what's needed: relevant file paths, constraints, conventions. Assume sub-tasks share nothing with you or each other unless your agent documents otherwise (some inherit conversation context; most share the filesystem) — over-include rather than assume.
+3. **Done-criteria** — *decidable*: mechanically checkable wherever possible (exact test command, invariant, expected diff scope), otherwise judgeable from evidence by a Gate 2 verification pass — then state what evidence would settle it. If you can't state a decidable done-criterion either way, the unit is under-specified — re-decompose.
 4. **Output format** — exactly what to return (diff, file list, structured findings). Forbid narration.
 5. **Depth instruction** — request deep reasoning explicitly, or "be direct, don't explore" for shallow units.
 
@@ -87,15 +90,16 @@ Every sub-task prompt contains, in this order:
 
 Everything you read compounds — it stays in your context for the rest of the session. Minimize what flows through you:
 
-- **Don't read files directly** when a reader dispatch can return a scoped summary (T0 for targeted extraction, T1 for comprehension — see reader split).
+- **Don't read files directly** when a reader dispatch can return a scoped summary (T0 for targeted extraction, T1 for comprehension — see reader split). *Agents without sub-tasks: skip this rule — read directly, and keep what you carry forward minimal.*
 - **Cap sub-task returns.** Every dispatch specifies a max return size (e.g. "return ≤150 tokens: files changed, test result, one-line summary"). You get references, not contents.
 - **Failure histories arrive compressed:** failure type + one-line cause + what was tried — never raw failed output.
 - **Plan in one pass.** Front-load decomposition and routing so execution runs without you. Iterative "dispatch one, look, dispatch next" loops are the most expensive orchestration pattern possible.
 
 ## Budget discipline
 
-- Default distribution for a typical feature: ~60% of dispatches T0/T1, ~35% T2, ≤5% T3/maximum-depth. Heavier than that → re-decompose; you're under-specifying units.
-- **Escalation ledger:** append every escalated or surfaced unit to `.claude/escalation-ledger.md` (or your agent's equivalent state directory) — `unit | initial tier | failure type | final tier | outcome`. Create the file with its header row if missing. This ledger is how the routing mapping gets corrected over time. When a spec failure traces to missing context, encode that context into your agent's instruction file (`AGENTS.md`, `CLAUDE.md`, a skill) — the question is "what context was the model missing and how do we solve it for next time?", and the same context should never be missing twice.
+- Announce a **global dispatch cap** with the routing plan (default: 3× unit count). Hitting it means stop and surface — budgets are global, not just per-unit.
+- Default distribution for a typical feature: ~60% of dispatches T0/T1, ~35% T2, ≤5% T3/maximum-depth — a guideline for spotting under-specified plans, **not a quota**: never relabel or fragment work to fit it. Heavier than that → re-decompose.
+- **Escalation ledger:** append every escalated or surfaced unit to `.claude/escalation-ledger.md` (or your agent's equivalent state directory) — `unit | initial tier | failure type | final tier | outcome`. Create the file with its header row if missing; in read-only sessions, report the entries in your output instead of writing files. This ledger is how the routing mapping gets corrected over time. When a spec failure traces to missing context, propose encoding that context into your agent's instruction file (`AGENTS.md`, `CLAUDE.md`, a skill) — **with the user's approval, never unprompted** — because the question is "what context was the model missing and how do we solve it for next time?", and the same context should never be missing twice.
 - If more than a third of units escalate in a session, your decomposition or specs are the problem, not the models. Stop and re-plan.
 
 ## What you keep for yourself
