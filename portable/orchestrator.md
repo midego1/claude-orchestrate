@@ -20,11 +20,12 @@ When orchestrating, you are the **orchestrator**: decompose work, dispatch sub-t
 
 1. **Decompose** the task into independent units with explicit inputs, outputs, and done-criteria.
 2. **Classify** each unit by capability tier (table below) and announce the routing plan as one compact table before dispatching. No prose justification per unit.
-3. **Dispatch** units through your agent's sub-task mechanism (sub-agents, background tasks, parallel tool calls — whatever is available; see *Capability fallbacks*). Run independent units in parallel where supported; serialize only true dependencies. **Parallelism caveat:** parallel execution is for read-only work; workers that mutate files in the same working tree must be serialized or isolated (separate worktrees) — they fight over lockfiles, build caches, and dev-server ports.
+3. **Dispatch** units through your agent's sub-task mechanism (sub-agents, background tasks, parallel tool calls — whatever is available; see *Capability fallbacks*). Run independent units in parallel where supported; serialize only true dependencies. **Parallelism caveat:** parallel execution is free for read-only work. Prefer giving file-mutating workers **isolated worktrees** so they run in parallel without colliding; when isolation isn't available, serialize them — workers sharing a working tree fight over lockfiles, build caches, and dev-server ports.
 4. **Verify tiered** — never accept work unchecked:
-   - **Gate 1 (mechanical, ~free):** make done-criteria machine-checkable wherever possible — a passing test, a clean build, a grep-checkable invariant, a diff limited to declared files. Run these as shell commands.
+   - **Gate 1 (mechanical, ~free):** make done-criteria machine-checkable wherever possible — a passing test, a clean build, a clean lint run, a grep-checkable invariant, a diff limited to declared files, and where the change has runtime surface, an end-to-end check against a real dev environment. Run these as shell commands.
    - **Gate 2 (cheap review):** for output that can't be mechanically checked, run a verification pass one tier below the producer (floor at T0). Security- or correctness-critical output gets T1 minimum. The verifier must return PASS/FAIL per criterion with **cited evidence** — test output, line numbers, diff hunks. A verdict without evidence is a FAIL. Judgment about what's *missing* (root cause vs. symptom, semantic equivalence, edge-case coverage) needs T1+, not T0.
    - **Gate 3 (you):** check cross-unit consistency and integration, not unit-level correctness. Consume one-line gate results; read evidence only on FAIL.
+   - **Ship gate:** before declaring the task done, run an automated review over the **integrated diff** — a code-review pass, plus a security pass for anything touching auth, input handling, secrets, or infrastructure (T1+ reviewer, deep reasoning). Unit gates catch unit-level bugs; the ship gate catches what only exists after integration.
    - Never trust a sub-task's self-report of success. A claim of success without gate evidence is a FAIL.
 5. **Triage failures before escalating** — most failures are not capability failures:
    - **Spec failure** (ambiguous done-criteria, missing context, wrong assumptions) → rewrite the dispatch, retry at the **same** tier. Escalating a bad spec buys an expensive wrong answer.
@@ -94,7 +95,7 @@ Everything you read compounds — it stays in your context for the rest of the s
 ## Budget discipline
 
 - Default distribution for a typical feature: ~60% of dispatches T0/T1, ~35% T2, ≤5% T3/maximum-depth. Heavier than that → re-decompose; you're under-specifying units.
-- **Escalation ledger:** append every escalated or surfaced unit to `.claude/escalation-ledger.md` (or your agent's equivalent state directory) — `unit | initial tier | failure type | final tier | outcome`. Create the file with its header row if missing. This ledger is how the routing mapping gets corrected over time.
+- **Escalation ledger:** append every escalated or surfaced unit to `.claude/escalation-ledger.md` (or your agent's equivalent state directory) — `unit | initial tier | failure type | final tier | outcome`. Create the file with its header row if missing. This ledger is how the routing mapping gets corrected over time. When a spec failure traces to missing context, encode that context into your agent's instruction file (`AGENTS.md`, `CLAUDE.md`, a skill) — the question is "what context was the model missing and how do we solve it for next time?", and the same context should never be missing twice.
 - If more than a third of units escalate in a session, your decomposition or specs are the problem, not the models. Stop and re-plan.
 
 ## What you keep for yourself
