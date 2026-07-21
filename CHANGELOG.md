@@ -2,6 +2,19 @@
 
 All notable changes to the orchestrate plugin. The update notifier reads this file — keep the **Why update** line on every release.
 
+## [0.5.1] — 2026-07-21
+
+Second field report, from a third production wave that ran WITH the 0.5.0 rules injected via prompt (agent defs still 0.4.2) — a natural experiment in where discipline must live.
+
+**Why update:** the checkpoint can no longer silently not-exist (atomic seed command + orchestrator tripwire), archive paths stop landing in the wrong repo root, worker worktrees fork at the exact baseline, reachability checks now cover init/registration wiring (a dead-in-production drain loop passed every import grep), and the wind-down order that produced the cleanest pause of three runs is now protocol.
+
+- **Atomic archive seed**: one command creates dirs + seeded checkpoint.json + dispatch-log.md — "dirs exist, files don't" is structurally impossible; orchestrator verifies the file on first status check and sends the field-proven corrective if missing
+- **Archive path pinned** to the integration-worktree root (`git rev-parse --show-toplevel`), resolved once, stored in the checkpoint
+- **Manual worker worktrees** at the exact baseline SHA preferred over SDK `isolation:"worktree"` (which forks from session HEAD); merge-base preamble check demoted to backstop
+- **Reachability ⊇ init contracts**: stateful modules (managers/stores/outboxes) must have their `setUser`/`register`/`init` hook grep-verifiably invoked from the composition root, named in done-criteria
+- **Wind-down lifecycle order**: finish in-flight workers, integrate passers, surface (don't retry) failures, final checkpoint with resume plan, STATE line — plus the SendMessage next-tool-round delivery-latency caveat
+- Skipped-Gate-2 units register a named final-gate spot-check; the global cap explicitly counts workers + verifiers + retries
+
 ## [0.5.0] — 2026-07-21
 
 Field-hardening release from a monitored two-wave production run (33 units, ~35 workers, 4 environmental foreman deaths, 3 ship-gate MAJORs caught, zero capability escalations).
