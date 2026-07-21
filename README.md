@@ -249,7 +249,7 @@ Every release in [CHANGELOG.md](CHANGELOG.md) carries a one-line *Why update* so
 Two artifacts appear in **your** repo when orchestrating:
 
 - **`.claude/escalation-ledger.md`** — every escalated or surfaced unit (`unit | initial tier | failure type | final tier | outcome`), created on first use. This is the system's feedback loop: it shows where the routing table is mis-calibrated. If more than a third of units escalate in a session, the decomposition or the specs are the problem — not the models.
-- **`.claude/orchestrate-runs/<timestamp>/`** — the run archive: raw worker logs, gate outputs, and failure histories land here, referenced (not inlined) in what flows back to the orchestrator. This is how PASS lines stay one-line *and* auditable. Gitignore it if you don't want run logs in history.
+- **`.claude/orchestrate-runs/<timestamp>/`** — the run archive: `checkpoint.json` (machine-readable run state — the crash-recovery source of truth, rewritten before every dispatch round and after every integration), `dispatch-log.md` (human narrative), and `dispatch/`, `reports/`, `gates/`, `failures/` for raw prompts, worker returns, gate outputs, and failure histories — referenced (not inlined) in what flows back to the orchestrator. This is how PASS lines stay one-line *and* auditable, and how a killed foreman resumes instead of restarting. Gitignore it if you don't want run logs in history.
 
 ## FAQ
 

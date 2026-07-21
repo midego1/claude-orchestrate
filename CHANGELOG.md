@@ -2,6 +2,19 @@
 
 All notable changes to the orchestrate plugin. The update notifier reads this file — keep the **Why update** line on every release.
 
+## [0.5.0] — 2026-07-21
+
+Hardened against a real two-wave production run (33 units, ~35 workers across two foremen, 4 foreman process deaths — all environmental, zero capability escalations, 3 ship-gate MAJORs caught). Every change traces to observed field evidence.
+
+- **Checkpoint contract (change 1)**: free-form archive guidance replaced by a required `.claude/orchestrate-runs/<run>/checkpoint.json` — runId, integration branch, baseline/last-integrated SHAs, dispatch tally, per-unit status, nextAction — rewritten atomically before every dispatch round and after every integration; checkpoint-before-dispatch is as mandatory as the gates. Archive layout (`dispatch/`, `reports/`, `gates/`, `failures/`) specified once, in both the skill and the foreman def. In the field, one foreman kept a good narrative log and the other created the directories but wrote zero files; every crash recovery was git archaeology
+- **Foreman lifecycle (change 2)**: long runs assume the foreman WILL be killed — all 4 observed deaths were environmental (network, spend limit, host restart), now an explicit orchestrator-level triage class. Canonical recovery: checkpoint first, SendMessage-resume the same foreman (worked 4/4 in the field), fresh foreman only as fallback — explicitly disambiguated from the worker no-resume rule. Mandatory `STATE:` line ends every foreman turn (the last result blob is often all the orchestrator gets). Mid-run plan changes documented: full unit spec + explicit new global cap via SendMessage
+- **Gate-1 reachability for UI units (change 3)**: an import-chain grep proving each new component is reachable from a route — the field run shipped four fully-built, verifier-PASSed components imported nowhere; every mechanical gate passes on dead code
+- **Standard worker preamble (change 4)**: canonical block for worktree-isolated workers — verify your base with `git merge-base --is-ancestor` (fail fast, never improvise a branch), install command + no-runtime rules with EXECUTION-PENDING labeling, the phantom-failure rule (re-check failures on the untouched base; dependency drift caused two phantom typecheck failures), capped return contract. Orchestrator counterpart: keep the integration worktree on the integration branch when forking
+- **Foreman inline-fix policy (change 5)**: small direct commits allowed (env repairs, mechanical glue) but each needs Gate 1 evidence + a `foreman-fix` ledger entry, and never security/correctness-critical code — a field foreman committed a security fix directly and it got zero Gate 2 review
+- **Amendments (change 6)**: tier distribution qualified per work-type (spec-heavy schema/engine/UI builds legitimately run 40–50% T2; investigate only when T2 share AND escalation rate are both high); "encode missing context back" promoted to the ledger's headline rule — it eliminated a repeat Gate-2 failure class in the field; load-bearing rules marked "do not soften"
+
+**Why update:** on v0.4.2 a killed foreman leaves no recoverable state — and long runs get killed (4 times in one production run); v0.5.0 makes every run checkpointed and resumable, and closes the dead-code blind spot where all gates pass on components nothing imports.
+
 ## [0.4.2] — 2026-07-17
 
 Fixes worker→foreman result routing, observed in a live run on v0.4.1: retried workers' completions escalated to the main session instead of the idle foreman, and workers trying to SendMessage the foreman failed (agent handles are session-scoped) — every retry result bounced through the orchestrator, the exact overhead the protocol exists to avoid.
