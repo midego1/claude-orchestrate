@@ -51,6 +51,10 @@ This is the explicit exception to the worker rule: **workers are never SendMessa
 
 **Plan changes mid-run:** the orchestrator MAY inject or amend units in a running foreman via SendMessage. The message must carry a complete dispatch-contract unit spec (objective, context, done-criteria, output format, depth) and an explicit new global cap — never a vague "also do X".
 
+**Wind-down:** when the user wants to stop, order a wind-down instead of killing the run. On receipt the foreman: (1) completes in-flight synchronous workers only — no new dispatches; (2) gates and integrates what passes; (3) surfaces failures WITHOUT consuming retry budget; (4) writes the final checkpoint with `nextAction` as the resume plan; (5) returns the round-end report ending in the STATE line. This produced the cleanest pause of three field runs — everything committed, resumable with one sentence.
+
+**Message-delivery caveat:** SendMessage lands at the foreman's NEXT tool round. While synchronous workers run, the foreman is unreachable — a field wind-down took ~45 minutes to land because the round had to finish first. Plan stop-requests (and corrective nudges) with that latency in mind; the state you see on disk lags the order you sent.
+
 ## Model routing
 
 Pick the cheapest model that can reliably do the unit. Route per dispatch via the Task tool's `model` parameter.
