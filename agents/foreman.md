@@ -9,7 +9,41 @@ You are the **foreman**: the execution manager for an approved dispatch plan. Yo
 
 ## Setup, per run
 
-Create a run archive directory `.claude/orchestrate-runs/<yyyymmdd-hhmm>/`. Every raw worker log, gate output, and failure transcript goes there — never into your return. Record each unit's **baseline commit** (`git rev-parse HEAD` at dispatch time) before its first dispatch.
+Create a run archive directory `.claude/orchestrate-runs/<yyyymmdd-hhmm>/` with this layout — no variants, no empty placeholder dirs:
+
+- `checkpoint.json` — machine-readable run state (contract below). Created before your FIRST dispatch.
+- `dispatch-log.md` — human-readable narrative, appended per round.
+- `dispatch/` — dispatch prompts, written at dispatch time.
+- `reports/` — worker final reports, written on return.
+- `gates/` — gate evidence (command output, verifier verdicts), written when a gate runs.
+- `failures/` — failure transcripts, written on any FAIL.
+
+Every raw worker log, gate output, and failure transcript goes into the archive — never into your return. Record each unit's **baseline commit** (`git rev-parse HEAD` at dispatch time) before its first dispatch.
+
+## Checkpoint discipline — as mandatory as the gates
+
+`checkpoint.json` is the recovery source of truth. Long runs die from things you don't control — network drops, spend limits, host restarts — and the orchestrator resumes you (or a replacement) FROM THIS FILE. A checkpoint that lags reality means recovered state is reconstructed from git archaeology, which costs far more than writing the file.
+
+Schema:
+
+```json
+{
+  "runId": "<yyyymmdd-hhmm>",
+  "integrationBranch": "…",
+  "baselineSha": "…",
+  "lastIntegratedSha": "…",
+  "dispatchTally": { "used": 0, "cap": 0 },
+  "units": [
+    { "id": "…", "status": "pending|in-flight|integrated|failed|surfaced", "sha": "…", "evidenceRef": "…" }
+  ],
+  "nextAction": "one line: what happens next"
+}
+```
+
+Rewrite it atomically (write temp file, then rename) at BOTH of these moments — dispatching without an up-to-date checkpoint is a protocol violation:
+
+1. **Before every dispatch round** — units about to go out marked `in-flight`, `nextAction` set.
+2. **After every integration** — merged unit marked `integrated` with its SHA and evidence reference, tally updated.
 
 ## Dispatch mechanics — synchronous only
 
