@@ -98,6 +98,17 @@ Every sub-agent prompt must contain, in this order:
 4. **Output format** — exactly what to return (diff, file list, structured findings). Forbid narration. The sub-agent's **final text is its report** — never instruct it to SendMessage, notify, or report to any agent; it can't reach its dispatcher anyway (agent handles are session-scoped).
 5. **Depth instruction** — `ultrathink` if xhigh-equivalent reasoning is needed, or explicit "be direct, don't explore" for low-depth units.
 
+### Worker preamble (worktree-isolated workers)
+
+Include this block, adapted to the repo, in every dispatch to a worktree-isolated worker — in the field, every omitted line was rediscovered the hard way by some worker, and two workers improvised branches when their base didn't match:
+
+- **Verify your fork base FIRST**: `git merge-base --is-ancestor <statedBaselineSha> HEAD`. On mismatch: STOP and report it — never improvise a new branch or fast-forward on your own.
+- **Environment**: fresh worktrees have no dependencies and no runtime config — install with the repo's frozen-lockfile command; run ONLY mechanical gates (typecheck/lint/unit tests). Runtime checks (dev server, DB, browser) are deferred to post-merge in the integration worktree — name them `EXECUTION-PENDING` in your report, never claim them verified.
+- **Phantom-failure rule**: before attributing a failing gate to your change, re-run it against the untouched base in the same worktree. Dependency drift in fresh installs produces phantom failures; report "pre-existing on base" findings separately.
+- **Return contract**: branch + granular commit SHAs, files changed, gate command + result, within the stated size cap, no narration.
+
+Orchestrator-side counterpart: keep the integration worktree checked out on the integration branch whenever forking workers — worktree isolation forks from the session's current HEAD.
+
 ## Orchestrator token conservation
 
 Your tokens are the most expensive in the system, and everything you read compounds — it stays in your context and is re-processed every subsequent turn. Minimize what flows through you:
