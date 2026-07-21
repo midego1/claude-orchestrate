@@ -122,10 +122,20 @@ Your tokens are the most expensive in the system, and everything you read compou
 ## Budget discipline
 
 - Announce the routing plan (units → model/depth) before dispatching, in one compact table — including a **global dispatch cap** (default: 3× unit count). Hitting the global cap means stop and surface, exactly like a per-unit budget: budgets are global, not just per-unit.
-- Default distribution for a typical feature: ~60% of dispatches T0/T1, ~35% T2, ≤5% T3/max — a guideline for spotting under-specified plans, **not a quota**: never relabel or fragment genuinely complex work to fit it. If your plan is heavier, re-decompose.
-- **Escalation ledger:** at session end, append every escalated or surfaced unit to `.claude/escalation-ledger.md` — unit description, initial tier, failure type (spec/env/capability), final tier, outcome. Create the file with its header row if it doesn't exist. This ledger is how the routing table gets corrected over time. When a spec failure traces to **missing context**, don't just log it — encode that context into `CLAUDE.md` or the relevant skill, so the question shifts from "did the model read the code?" to "what context was the model missing and how do we solve it for next time?" The same context should never be missing twice.
+- Default distribution for a typical feature: ~60% of dispatches T0/T1, ~35% T2, ≤5% T3/max — a guideline for spotting under-specified plans, **not a quota**: never relabel or fragment genuinely complex work to fit it. Spec-heavy schema/engine/UI builds legitimately run 40–50% T2; investigate only when the T2 share AND the escalation rate are both high. If your plan is heavier without that justification, re-decompose.
+- **Escalation ledger — the same context should never be missing twice.** The ledger's highest-value move: when a spec failure traces to **missing context**, encode that context into `CLAUDE.md`, the relevant skill, or your subsequent dispatch templates immediately — in the field this eliminated a repeat failure class within one run (two G2 FAILs traced to one missing constraint; every later dispatch carried it and the class never recurred). At session end, append every escalated or surfaced unit to `.claude/escalation-ledger.md` — unit description, initial tier, failure type (spec/env/capability), final tier, outcome. Create the file with its header row if it doesn't exist. This ledger is how the routing table gets corrected over time.
 - If more than a third of units escalate in a session, your decomposition or specs are the problem, not the models. Stop and re-plan.
 
 ## What you keep for yourself
 
 Plan construction, routing decisions, capability-escalation decisions, cross-unit consistency checks, merge-conflict resolution between sub-agent outputs, final verification of the integrated result, and the decision to ship. Failure triage and unit-level verification belong to the foreman and the gates. Everything else gets dispatched.
+
+## Load-bearing — do not soften
+
+These rules each caught real defects that nothing else would have; treat proposals to relax them as regressions:
+
+- Tiered gates with evidence-or-FAIL (every tier caught bugs the tier below could not).
+- One fix round + one re-review after the ship gate — never a fix/review loop.
+- Worktree isolation + sequential merge with per-merge gates (zero lockfile fights across dozens of parallel workers).
+- Synchronous workers, parallelism via multiple Agent calls in one message (no orphaned background children).
+- Never trusting a sub-agent's self-report of success — including the foreman's.
