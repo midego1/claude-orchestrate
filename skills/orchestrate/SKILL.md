@@ -22,17 +22,67 @@ You are the **orchestrator**. Your job is to decompose work, dispatch sub-agents
 2. **Classify** each unit by complexity tier (below).
 3. **Delegate execution to a foreman.** For any plan with more than ~3 units, hand the full dispatch plan to an **opus foreman** sub-agent that runs the loop: dispatches workers, runs gates, triages failures, manages retries within budget. You re-enter only for capability escalations past the foreman's authority, plan changes, and final integration. For small plans (≤3 units), dispatch directly yourself — you then run Gates 1 and 2 for those units too; direct mode skips the foreman, never the gates. Sub-agents run in parallel wherever units don't depend on each other; serialize only true dependencies. **Dispatch mechanics:** the foreman itself MAY run as a background agent — you spawned it, so its completion notification routes back to you. Workers and verifiers are different: whether dispatched by the foreman or by you in direct mode, they are always **synchronous** — pass `run_in_background: false` explicitly (the harness defaults to background) — and parallelism within a wave means multiple Agent calls in a single message (parallel tool use), each result returning inline as its tool result. Background worker dispatch is forbidden: a sub-agent's background children don't reliably notify it (the moment the dispatcher idles, completions escalate to the main session), and a worker can never message its dispatcher (agent handles are session-scoped). A worker's final text IS its report — dispatch prompts never instruct a worker to SendMessage or report to anyone. Retries are fresh synchronous dispatches carrying the failed attempt's report and verdict — never a SendMessage-resume of an idle worker, whose completion would route to the main session too. **Parallelism caveat:** parallel dispatch applies freely to read-only workers. Prefer giving file-mutating workers **worktree isolation** (the Task tool's worktree option) so they run in parallel without colliding; when isolation isn't available, serialize them — workers sharing a working tree fight over lockfiles, build caches, and dev-server ports. **Integration protocol:** record each unit's baseline commit at dispatch; isolated workers commit their work and return branch + commit SHA, not just file paths. Passed units are merged back sequentially, re-running Gate 1 after each merge; merge conflicts come to you (semantic conflict resolution is yours). Diff-scope checks measure against the recorded baseline, and a failed attempt's changes are reset to baseline before any retry — no contamination between attempts.
 4. **Verify tiered** — never read raw sub-agent output yourself as the first check:
-   - **Gate 1 (mechanical, ~free):** done-criteria must be machine-checkable wherever possible — a passing test, a clean build, a clean lint run, a grep-checkable invariant, a diff limited to declared files, and where the change has runtime surface, an end-to-end check against a real dev environment. Run these as bash commands.
+   - **Gate 1 (mechanical, ~free):** done-criteria must be machine-checkable wherever possible — a passing test, a clean build, a clean lint run, a grep-checkable invariant, a diff limited to declared files, and where the change has runtime surface, an end-to-end check against a real dev environment. For units that add UI components or routes: a grep proving each new component is imported by a route-reachable file — typecheck and unit tests pass on dead code. Run these as bash commands.
    - **Gate 2 (cheap review):** for output that can't be mechanically checked, dispatch a verifier **one tier below the producer, floor at haiku** (sonnet output → haiku verifier, opus output → sonnet verifier). Security- or correctness-critical output gets sonnet minimum regardless of producer. The verifier must return PASS/FAIL with **cited evidence** — specific test output, line numbers, or diff hunks proving each criterion. A verdict without evidence is a FAIL. Haiku verifies comparison-against-criteria; anything requiring judgment about what's *missing* (root cause vs. symptom, semantic equivalence, edge-case coverage) goes to sonnet.
-   - **Gate 3 (you):** only gate-passed, foreman-summarized output reaches you. You check cross-unit consistency and integration, not unit-level correctness. Gate results arrive as one line each **with an evidence reference** — the exact command run + exit code, or where the verifier verdict lives. Full logs and failure histories go to a run archive (`.claude/orchestrate-runs/`), referenced by path: auditable on demand without flowing through your context. Evidence bodies are attached only on FAIL.
+   - **Gate 3 (you):** only gate-passed, foreman-summarized output reaches you. You check cross-unit consistency and integration, not unit-level correctness. Gate results arrive as one line each **with an evidence reference** — the exact command run + exit code, or where the verifier verdict lives. Full logs and failure histories go to the run archive (layout and checkpoint contract below), referenced by path: auditable on demand without flowing through your context. Evidence bodies are attached only on FAIL.
    - **Ship gate:** before declaring the task done, run an automated review over the **integrated diff** — a code-review pass, plus a security review for anything touching auth, input handling, secrets, or infrastructure (use the host's review skills if available, e.g. `/code-review`; otherwise dispatch a T2 reviewer). Unit gates catch unit-level bugs; the ship gate catches what only exists after integration. Ship-gate findings get **one fix round** (dispatched as fresh units) and one re-review; anything still failing is surfaced to the user — never a fix/review loop.
    - Never trust a sub-agent's self-report of success. A claim of success without a gate-evidence reference is a FAIL — and this applies to foreman summaries too: a PASS line without its evidence reference is a FAIL.
 5. **Triage failures before escalating** — most failures are not capability failures:
    - **Spec failure** (ambiguous done-criteria, missing context, wrong assumptions in the dispatch) → rewrite the dispatch, retry at the **same** tier. Escalating a bad spec buys an expensive wrong answer.
-   - **Environment failure** (flaky test, missing dep, wrong branch, stale state) → fix the environment, retry same tier.
+   - **Environment failure** (flaky test, missing dep, wrong branch, stale state) → fix the environment, retry same tier. Foreman process death — network failure, spend limit, host restart — is this same class one level up: recover (see Foreman lifecycle), don't re-plan.
    - **Capability failure** (spec was correct and complete, model genuinely couldn't do it) → escalate, including the failed attempt and the failure reason in the new dispatch.
    - **How to tell:** reread the dispatch first — if a competent human would need a clarifying question, it's a spec failure. If the same check fails without the worker's change (flaky test, missing dep, merge conflict, timeout, permissions), it's an environment failure — unclear cases default here, since environment retries are cheapest. Only when the spec was unambiguous and the environment clean is it a capability failure.
 6. **Retry budget:** an *attempt* is one worker dispatch. Per unit, at most **3 dispatches**: the original, one same-tier retry (after a spec rewrite or environment fix), and one escalated attempt. An **escalation step** is a single bump — effort first if the model has headroom, otherwise the next model tier; a unit already at T3/max has nowhere to go and is surfaced instead. Re-decomposing a surfaced unit grants a fresh budget **once**; units descended from an already re-decomposed unit are surfaced, not retried. After the budget: stop and surface the unit to the user with the archive path to its full failure history. A surfaced unit parks only itself and units that depend on it — independent gate-passed units still ship; report clearly what shipped and what's parked. Never enter an escalation ladder.
+
+## Run archive and checkpoint
+
+Every run gets an archive at `.claude/orchestrate-runs/<run>/` with exactly this layout — no variants, no empty scaffolding:
+
+- `checkpoint.json` — machine-readable run state, the recovery source of truth. Created before the first dispatch.
+- `dispatch-log.md` — human-readable narrative of the run, in order. Narrative only — never the recovery source.
+- `dispatch/` — every worker prompt as sent, written at dispatch time.
+- `reports/` — every worker return, written on return.
+- `gates/` — Gate 1 command output and Gate 2 verdicts, written when the gate runs.
+- `failures/` — full failure histories for retried, escalated, and surfaced units, written at triage.
+
+**Checkpoint contract — REQUIRED.** `checkpoint.json` holds:
+
+```json
+{
+  "runId": "…",
+  "integrationBranch": "…",
+  "baselineSha": "…",
+  "lastIntegratedSha": "…",
+  "dispatchTally": { "used": 0, "cap": 0 },
+  "units": [
+    { "id": "…", "status": "pending|in-flight|integrated|failed|surfaced", "sha": "…", "evidenceRef": "…" }
+  ],
+  "nextAction": "…"
+}
+```
+
+(`sha` and `evidenceRef` are optional per unit.) Write discipline: the foreman rewrites the whole file atomically **before dispatching each round** and **after each integration**. Checkpoint-before-dispatch is as mandatory as the gates — a foreman turn that dispatches with a stale checkpoint is a protocol violation. When a process dies, recovery reads `checkpoint.json` first and the integration branch's git log second; the narrative log is for humans.
+
+## Foreman lifecycle: crashes, resume, plan changes
+
+Long orchestrations must assume the foreman process **will** be killed — network failures, spend limits, host session restarts. That is an **environment failure at the orchestrator level**: same triage class, one level up. Recover; don't re-plan.
+
+**Canonical recovery, in order:**
+1. **Verify on-disk state** — read `.claude/orchestrate-runs/<run>/checkpoint.json` first; fall back to the integration branch's `git log` if the checkpoint is stale or missing.
+2. **SendMessage-resume the SAME foreman agent id** with a state confirmation: last-integrated SHA, dispatch tally, next unit. Its transcript context is intact — resume is cheap and reliable.
+3. **Only if resume fails**, spawn a fresh foreman seeded from the checkpoint.
+
+**This is the exception, not a contradiction of the worker rule.** Workers are NEVER SendMessage-resumed — retries are always fresh dispatches, because a resumed worker's completion routes to the main session, not its dispatcher. The foreman is different precisely because *you* spawned it: its completion routes back to you.
+
+**STATE line — mandatory.** The final sentence of every foreman visible turn is:
+
+```
+STATE: integrated <sha> · tally <n>/<cap> · next <unit>
+```
+
+When the process dies, the last result blob is often the only thing the orchestrator receives — the breadcrumb is a rule, not luck.
+
+**Plan changes mid-run:** you MAY inject or amend units in a live foreman via SendMessage. The message must carry a **full dispatch-contract unit spec** (objective, context, done-criteria, output format, depth) and an **explicit new global dispatch cap** — never "also do this" without re-stating the cap.
 
 ## Model routing
 
@@ -79,9 +129,21 @@ Effort levels: `low` → `medium` → `high` → `xhigh` → `max`. Haiku does n
 Every sub-agent prompt must contain, in this order:
 1. **Objective** — one sentence, the outcome, not the steps.
 2. **Context** — only what's needed: relevant file paths, constraints, conventions. Sub-agents share nothing with you or each other; over-include rather than assume.
-3. **Done-criteria** — *decidable*: mechanically checkable wherever possible (exact test command, invariant, expected diff scope), otherwise judgeable from evidence by a Gate 2 verifier — then state what evidence would settle it. If you can't state a decidable done-criterion either way, the unit is under-specified — re-decompose.
+3. **Done-criteria** — *decidable*: mechanically checkable wherever possible (exact test command, invariant, expected diff scope), otherwise judgeable from evidence by a Gate 2 verifier — then state what evidence would settle it. UI units additionally get a **reachability** criterion: an import-chain grep proving the component is reachable from a route, plus runtime mount evidence post-merge. If you can't state a decidable done-criterion either way, the unit is under-specified — re-decompose.
 4. **Output format** — exactly what to return (diff, file list, structured findings). Forbid narration. The sub-agent's **final text is its report** — never instruct it to SendMessage, notify, or report to any agent; it can't reach its dispatcher anyway (agent handles are session-scoped).
 5. **Depth instruction** — `ultrathink` if xhigh-equivalent reasoning is needed, or explicit "be direct, don't explore" for low-depth units.
+
+### Standard worker preamble (worktree-isolated workers)
+
+Every dispatch prompt for a worktree-isolated worker includes this block, placeholders filled — each line exists because its absence cost a real run:
+
+> You are in an isolated worktree.
+> - **Verify your base FIRST:** run `git merge-base --is-ancestor <baselineSha> HEAD`. If it fails, STOP and report the mismatch — do not improvise a new branch, do not fast-forward.
+> - **Environment:** fresh worktrees have no installed dependencies and no `.env`. Install with `<repo's install command, frozen lockfile — e.g. pnpm install --frozen-lockfile>`. Runtime services are unavailable: run mechanical gates only (typecheck / lint / unit tests). Mark any done-criterion you cannot check without runtime **EXECUTION-PENDING** — it will be checked post-merge in the integration worktree.
+> - **Phantom-failure rule:** if a gate fails, re-run it on the untouched base in this same worktree before attributing it to your change (dependency drift in fresh installs produces phantom failures). Report "pre-existing on base" findings separately — do not fix them, do not block on them.
+> - **Return:** branch name + commit SHAs (commit granularly), files changed, each gate command + its result, ≤`<N>` tokens, no narration.
+
+Orchestrator-side counterpart: whenever workers are being forked, keep the integration worktree checked out on the integration branch — worktrees fork from what is checked out, and a drifted checkout hands every worker a wrong baseline.
 
 ## Orchestrator token conservation
 
@@ -91,15 +153,28 @@ Your tokens are the most expensive in the system, and everything you read compou
 - **Cap sub-agent returns.** Every dispatch specifies a max return size (e.g. "return ≤150 tokens: files changed, test result, one-line summary"). Full diffs and logs stay with the foreman; you get references, not contents.
 - **Failure histories arrive compressed.** The foreman's triage summary (failure type + one-line cause + what was tried) is what you read — never raw failed output.
 - **Plan in one pass.** Front-load decomposition and routing so execution runs without you. Iterative "dispatch one, look, dispatch next" loops through your context are the most expensive orchestration pattern possible.
-- **Foreman authority:** the foreman resolves spec and environment failures autonomously and owns the full retry budget. Only capability escalations to T2+ and plan-invalidating discoveries come back to you.
+- **Foreman authority:** the foreman resolves spec and environment failures autonomously and owns the full retry budget. Only capability escalations to T2+ and plan-invalidating discoveries come back to you. **Inline fixes:** the foreman MAY make small direct commits (environment repairs, mechanical glue), but each one requires (a) a Gate 1 run recorded with evidence, (b) a checkpoint/ledger entry marked `foreman-fix`, and (c) NEVER security- or correctness-critical code — those are dispatched as units so they get Gate 2 and the ship gate.
 
 ## Budget discipline
 
-- Announce the routing plan (units → model/depth) before dispatching, in one compact table — including a **global dispatch cap** (default: 3× unit count). Hitting the global cap means stop and surface, exactly like a per-unit budget: budgets are global, not just per-unit.
-- Default distribution for a typical feature: ~60% of dispatches T0/T1, ~35% T2, ≤5% T3/max — a guideline for spotting under-specified plans, **not a quota**: never relabel or fragment genuinely complex work to fit it. If your plan is heavier, re-decompose.
-- **Escalation ledger:** at session end, append every escalated or surfaced unit to `.claude/escalation-ledger.md` — unit description, initial tier, failure type (spec/env/capability), final tier, outcome. Create the file with its header row if it doesn't exist. This ledger is how the routing table gets corrected over time. When a spec failure traces to **missing context**, don't just log it — encode that context into `CLAUDE.md` or the relevant skill, so the question shifts from "did the model read the code?" to "what context was the model missing and how do we solve it for next time?" The same context should never be missing twice.
+- Announce the routing plan before dispatching, in this canonical table — one row per unit, then one cap line. Nothing dispatches before the table is announced:
+
+  | unit | tier | model | effort | isolation | verifier | dispatches |
+  |---|---|---|---|---|---|---|
+  | U1 <short name> | T1 | sonnet | high | worktree | fast | 0/3 |
+  | U2 <short name> | T2 | opus | xhigh | worktree | deep | 0/3 |
+
+  `cap: 0/<global cap> · foreman: opus @ high · integration branch: <name>`
+
+  The **global dispatch cap** defaults to 3× unit count. Hitting it means stop and surface, exactly like a per-unit budget: budgets are global, not just per-unit. The `verifier` column makes visible which units get `verifier-deep` — where the security/correctness guarantee lives; the rows map 1:1 onto the checkpoint's `units` array, so plan and recovery state stay congruent. This table is announced **once**; running progress lives in the STATE line and the run archive, never in per-wave tables flowing back through your context.
+- Default distribution for a typical feature: ~60% of dispatches T0/T1, ~35% T2, ≤5% T3/max — a guideline for spotting under-specified plans, **not a quota**: never relabel or fragment genuinely complex work to fit it. The guideline shifts with work type — spec-heavy schema/engine/UI builds legitimately run 40–50% T2. Investigate only when the T2 share AND the escalation rate are both high: heavy but clean-passing is the work being what it is; heavy and escalating is a decomposition problem.
+- **Escalation ledger — headline rule: encode missing context back.** When a spec failure traces to **missing context**, encode that context into the dispatch template, `CLAUDE.md`, or the relevant skill — logging it is not enough. This is the highest-value move in the protocol: one encoded context eliminates a whole repeat-failure class. The test: **the same context should never be missing twice.** Mechanics: at session end, append every escalated or surfaced unit to `.claude/escalation-ledger.md` — unit description, initial tier, failure type (spec/env/capability), final tier, outcome. Create the file with its header row if it doesn't exist. This ledger is how the routing table gets corrected over time.
 - If more than a third of units escalate in a session, your decomposition or specs are the problem, not the models. Stop and re-plan.
 
 ## What you keep for yourself
 
 Plan construction, routing decisions, capability-escalation decisions, cross-unit consistency checks, merge-conflict resolution between sub-agent outputs, final verification of the integrated result, and the decision to ship. Failure triage and unit-level verification belong to the foreman and the gates. Everything else gets dispatched.
+
+## Maintenance note — load-bearing, do not soften
+
+Field-proven at production scale. When editing this file, keep these exactly as strict as written: tiered gates with evidence-or-FAIL, the one-fix-round + one-re-review ship-gate cap, worktree isolation with sequential merge and per-merge gates, synchronous workers dispatched parallel-in-one-message, and never trusting self-reports.

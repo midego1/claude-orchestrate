@@ -103,12 +103,29 @@ Given a substantive task, the orchestrator:
 
 1. **Decomposes** it into independent units, each with explicit inputs, outputs, and machine-checkable done-criteria.
 2. **Classifies** each unit into a complexity tier (T0–T3) and announces the routing plan as one compact table — before spending anything.
-3. **Hands execution to a foreman** (an Opus sub-agent) that dispatches workers in synchronous parallel waves, runs verification gates, triages failures, and manages retries — without the expensive top model in the loop. (Plans of ≤3 units skip the foreman; the orchestrator runs the loop and the gates itself.)
+3. **Hands execution to a foreman** (an Opus sub-agent) that dispatches workers in synchronous parallel waves, runs verification gates, triages failures, and manages retries — without the expensive top model in the loop. File-mutating workers each run in an **isolated git worktree** — forked from a verified baseline (workers check it with `git merge-base --is-ancestor` and fail fast rather than improvise), merged back one at a time with gates re-run after each merge — so parallel agents can't collide or silently build on the wrong base. (Plans of ≤3 units skip the foreman; the orchestrator runs the loop and the gates itself.)
 4. **Verifies everything through gates.** Mechanical checks first (tests, builds, grep invariants — free), then cheap verifier agents that must cite evidence. A verdict without evidence is a FAIL.
 5. **Escalates only real capability failures** — after triage rules out bad specs and broken environments — one step at a time (effort before model), capped at 3 dispatches per unit and a global dispatch cap for the plan.
 6. **Integrates** gate-passed results, checks cross-unit consistency, runs a final **ship gate** — automated code review plus security review over the integrated diff — and ships.
 
 The net effect: frontier-quality output at a fraction of frontier cost, with failure containment built in.
+
+### What you see before it spends anything
+
+Every run opens with the routing plan in one canonical table — which agents get kicked off, on which models, at what depth, and who verifies each one — so you can veto the plan before any dispatch. A real plan looks like this:
+
+| unit | tier | model | effort | isolation | verifier | dispatches |
+|---|---|---|---|---|---|---|
+| U1 report schema types | T1 | sonnet | high | worktree | fast | 0/3 |
+| U2 calculation engine | T2 | opus | xhigh | worktree | deep | 0/3 |
+| U3 unit tests for U2 | T1 | sonnet | medium | worktree | fast | 0/3 |
+| U4 export UI component | T1 | sonnet | high | worktree | fast | 0/3 |
+| U5 audit-trail guard | T2 | opus | xhigh | worktree | deep | 0/3 |
+| U6 sweep: update 12 call sites | T0 | haiku | — | worktree | fast | 0/3 |
+
+`cap: 0/18 · foreman: opus @ high · integration branch: feat/report-model`
+
+The `verifier` column shows which units get the deep (sonnet @ xhigh) verifier — that's where the security/correctness guarantee lives. The table maps 1:1 onto the run's `checkpoint.json`, so the plan you approved and the state a crashed run recovers from are the same thing. It's announced once; live progress arrives as one `STATE:` line per foreman turn, not as tables through your expensive context.
 
 ## How it works
 
@@ -183,7 +200,7 @@ Key heuristics (full set in [`SKILL.md`](skills/orchestrate/SKILL.md)):
 - Spec so precise it's mechanically checkable → **drop a tier**.
 - Wrong answer expensive to detect → **route up** rather than rely on retry.
 - **Reader split:** targeted questions ("what does X do?") → haiku; open questions ("how does this subsystem work?") → sonnet. Haiku's failure mode as a reader is *silent omission* — the expensive kind.
-- Target distribution: ~60% T0/T1, ~35% T2, ≤5% T3. Heavier than that → the decomposition is wrong, not the models.
+- Target distribution: ~60% T0/T1, ~35% T2, ≤5% T3 — a guideline, not a quota: spec-heavy schema/engine/UI builds legitimately run 40–50% T2. Worry only when the T2 share *and* the escalation rate are both high — that's a decomposition problem, not the models.
 
 ### Reasoning depth
 
@@ -249,7 +266,7 @@ Every release in [CHANGELOG.md](CHANGELOG.md) carries a one-line *Why update* so
 Two artifacts appear in **your** repo when orchestrating:
 
 - **`.claude/escalation-ledger.md`** — every escalated or surfaced unit (`unit | initial tier | failure type | final tier | outcome`), created on first use. This is the system's feedback loop: it shows where the routing table is mis-calibrated. If more than a third of units escalate in a session, the decomposition or the specs are the problem — not the models.
-- **`.claude/orchestrate-runs/<timestamp>/`** — the run archive: raw worker logs, gate outputs, and failure histories land here, referenced (not inlined) in what flows back to the orchestrator. This is how PASS lines stay one-line *and* auditable. Gitignore it if you don't want run logs in history.
+- **`.claude/orchestrate-runs/<timestamp>/`** — the run archive: `checkpoint.json` (machine-readable run state — the crash-recovery source of truth, rewritten before every dispatch round and after every integration), `dispatch-log.md` (human narrative), and `dispatch/`, `reports/`, `gates/`, `failures/` for raw prompts, worker returns, gate outputs, and failure histories — referenced (not inlined) in what flows back to the orchestrator. This is how PASS lines stay one-line *and* auditable, and how a killed foreman resumes instead of restarting. Gitignore it if you don't want run logs in history.
 
 ## FAQ
 
