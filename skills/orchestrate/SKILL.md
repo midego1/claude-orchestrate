@@ -157,7 +157,16 @@ Your tokens are the most expensive in the system, and everything you read compou
 
 ## Budget discipline
 
-- Announce the routing plan (units → model/depth) before dispatching, in one compact table — including a **global dispatch cap** (default: 3× unit count). Hitting the global cap means stop and surface, exactly like a per-unit budget: budgets are global, not just per-unit.
+- Announce the routing plan before dispatching, in this canonical table — one row per unit, then one cap line. Nothing dispatches before the table is announced:
+
+  | unit | tier | model | effort | isolation | verifier | dispatches |
+  |---|---|---|---|---|---|---|
+  | U1 <short name> | T1 | sonnet | high | worktree | fast | 0/3 |
+  | U2 <short name> | T2 | opus | xhigh | worktree | deep | 0/3 |
+
+  `cap: 0/<global cap> · foreman: opus @ high · integration branch: <name>`
+
+  The **global dispatch cap** defaults to 3× unit count. Hitting it means stop and surface, exactly like a per-unit budget: budgets are global, not just per-unit. The `verifier` column makes visible which units get `verifier-deep` — where the security/correctness guarantee lives; the rows map 1:1 onto the checkpoint's `units` array, so plan and recovery state stay congruent. This table is announced **once**; running progress lives in the STATE line and the run archive, never in per-wave tables flowing back through your context.
 - Default distribution for a typical feature: ~60% of dispatches T0/T1, ~35% T2, ≤5% T3/max — a guideline for spotting under-specified plans, **not a quota**: never relabel or fragment genuinely complex work to fit it. The guideline shifts with work type — spec-heavy schema/engine/UI builds legitimately run 40–50% T2. Investigate only when the T2 share AND the escalation rate are both high: heavy but clean-passing is the work being what it is; heavy and escalating is a decomposition problem.
 - **Escalation ledger — headline rule: encode missing context back.** When a spec failure traces to **missing context**, encode that context into the dispatch template, `CLAUDE.md`, or the relevant skill — logging it is not enough. This is the highest-value move in the protocol: one encoded context eliminates a whole repeat-failure class. The test: **the same context should never be missing twice.** Mechanics: at session end, append every escalated or surfaced unit to `.claude/escalation-ledger.md` — unit description, initial tier, failure type (spec/env/capability), final tier, outcome. Create the file with its header row if it doesn't exist. This ledger is how the routing table gets corrected over time.
 - If more than a third of units escalate in a session, your decomposition or specs are the problem, not the models. Stop and re-plan.
