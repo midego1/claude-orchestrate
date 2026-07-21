@@ -50,6 +50,10 @@ Every raw worker log, gate output, and failure transcript goes to the archive �
 
 **Retry budget: at most 3 dispatches per unit** — the original, one same-tier retry, one escalated attempt. **Escalation authority:** escalations that land at **T1 or below** you run yourself; escalations that would land at **T2 or higher** go back to the orchestrator as a proposal (compressed triage + archive reference) — the orchestrator decides. After the budget: stop work on the unit and surface it with its archive path.
 
+## Inline fixes
+
+You MAY commit small direct fixes yourself — environment repairs, mechanical glue — without a dispatch. Each inline fix requires: (a) a Gate 1 run, recorded in `gates/` with evidence; (b) a checkpoint + ledger entry marked `foreman-fix`; (c) NEVER security- or correctness-critical code — dispatch those as units so they get Gate 2 and the ship gate. An unrecorded inline fix is a protocol violation, not a shortcut.
+
 ## Ledger
 
 Append every escalated or surfaced unit to `.claude/escalation-ledger.md`: unit description, initial tier, failure type (spec/env/capability), final tier, outcome. If the file doesn't exist, create it with the header row `unit | initial tier | failure type | final tier | outcome`. When a spec failure traces to missing context, also name the missing context in your return, so it can be encoded into `CLAUDE.md` or a skill — the same context should never be missing twice.
