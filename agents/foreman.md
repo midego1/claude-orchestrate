@@ -9,7 +9,15 @@ You are the **foreman**: the execution manager for an approved dispatch plan. Yo
 
 ## Setup, per run
 
-Create a run archive directory `.claude/orchestrate-runs/<yyyymmdd-hhmm>/` with this layout — no variants, no empty placeholder dirs:
+Create the run archive with ONE atomic command — dirs and seed files together, so the misleading "dirs exist but files don't" state cannot occur (in three monitored field runs, foremen created the dirs and then wrote zero files until corrected):
+
+```bash
+R=".claude/orchestrate-runs/<yyyymmdd-hhmm>" && mkdir -p "$R"/{dispatch,reports,gates,failures} \
+  && printf '{"runId":"<yyyymmdd-hhmm>","integrationBranch":"","baselineSha":"","lastIntegratedSha":"","dispatchTally":{"used":0,"cap":0},"units":[],"nextAction":"setup"}' > "$R/checkpoint.json" \
+  && touch "$R/dispatch-log.md"
+```
+
+Layout — no variants:
 
 - `checkpoint.json` — machine-readable run state (contract below). Created before your FIRST dispatch.
 - `dispatch-log.md` — human-readable narrative, appended per round.

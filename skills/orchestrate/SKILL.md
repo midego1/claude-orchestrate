@@ -38,6 +38,8 @@ You are the **orchestrator**. Your job is to decompose work, dispatch sub-agents
 
 Long orchestrations must assume the foreman process WILL be killed — network drops, provider spend limits, host restarts. In a monitored two-wave production run, all four foreman deaths were environmental and zero were capability failures. This is an **orchestrator-level environment failure**: triage it like any environment failure (recover and continue), never by re-planning.
 
+**Checkpoint tripwire:** on your FIRST status check of any foreman run, verify `checkpoint.json` exists and is non-empty. If not, send this corrective immediately (it worked in the field where the original instruction did not): "Write checkpoint.json NOW reflecting current state (integrated units + SHAs, in-flight units, tally, nextAction) and rewrite it before every subsequent dispatch round and after every integration." Prompt-carried discipline erodes; verified files don't.
+
 **Canonical recovery, in order:**
 1. **Verify on-disk state** — read the run's `checkpoint.json`; fall back to `git log` of the integration branch only if the checkpoint is missing or stale (and note the protocol violation).
 2. **SendMessage-resume the SAME foreman agent id** with a short state confirmation: last integrated SHA, dispatch tally, next unit. Its transcript context is intact; this is the cheap path and it works repeatedly across multiple deaths.
