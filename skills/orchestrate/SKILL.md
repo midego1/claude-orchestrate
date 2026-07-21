@@ -29,7 +29,7 @@ You are the **orchestrator**. Your job is to decompose work, dispatch sub-agents
    - Never trust a sub-agent's self-report of success. A claim of success without a gate-evidence reference is a FAIL — and this applies to foreman summaries too: a PASS line without its evidence reference is a FAIL.
 5. **Triage failures before escalating** — most failures are not capability failures:
    - **Spec failure** (ambiguous done-criteria, missing context, wrong assumptions in the dispatch) → rewrite the dispatch, retry at the **same** tier. Escalating a bad spec buys an expensive wrong answer.
-   - **Environment failure** (flaky test, missing dep, wrong branch, stale state) → fix the environment, retry same tier.
+   - **Environment failure** (flaky test, missing dep, wrong branch, stale state) → fix the environment, retry same tier. Foreman process death — network failure, spend limit, host restart — is this same class one level up: recover (see Foreman lifecycle), don't re-plan.
    - **Capability failure** (spec was correct and complete, model genuinely couldn't do it) → escalate, including the failed attempt and the failure reason in the new dispatch.
    - **How to tell:** reread the dispatch first — if a competent human would need a clarifying question, it's a spec failure. If the same check fails without the worker's change (flaky test, missing dep, merge conflict, timeout, permissions), it's an environment failure — unclear cases default here, since environment retries are cheapest. Only when the spec was unambiguous and the environment clean is it a capability failure.
 6. **Retry budget:** an *attempt* is one worker dispatch. Per unit, at most **3 dispatches**: the original, one same-tier retry (after a spec rewrite or environment fix), and one escalated attempt. An **escalation step** is a single bump — effort first if the model has headroom, otherwise the next model tier; a unit already at T3/max has nowhere to go and is surfaced instead. Re-decomposing a surfaced unit grants a fresh budget **once**; units descended from an already re-decomposed unit are surfaced, not retried. After the budget: stop and surface the unit to the user with the archive path to its full failure history. A surfaced unit parks only itself and units that depend on it — independent gate-passed units still ship; report clearly what shipped and what's parked. Never enter an escalation ladder.
@@ -62,6 +62,27 @@ Every run gets an archive at `.claude/orchestrate-runs/<run>/` with exactly this
 ```
 
 (`sha` and `evidenceRef` are optional per unit.) Write discipline: the foreman rewrites the whole file atomically **before dispatching each round** and **after each integration**. Checkpoint-before-dispatch is as mandatory as the gates — a foreman turn that dispatches with a stale checkpoint is a protocol violation. When a process dies, recovery reads `checkpoint.json` first and the integration branch's git log second; the narrative log is for humans.
+
+## Foreman lifecycle: crashes, resume, plan changes
+
+Long orchestrations must assume the foreman process **will** be killed — network failures, spend limits, host session restarts. That is an **environment failure at the orchestrator level**: same triage class, one level up. Recover; don't re-plan.
+
+**Canonical recovery, in order:**
+1. **Verify on-disk state** — read `.claude/orchestrate-runs/<run>/checkpoint.json` first; fall back to the integration branch's `git log` if the checkpoint is stale or missing.
+2. **SendMessage-resume the SAME foreman agent id** with a state confirmation: last-integrated SHA, dispatch tally, next unit. Its transcript context is intact — resume is cheap and reliable.
+3. **Only if resume fails**, spawn a fresh foreman seeded from the checkpoint.
+
+**This is the exception, not a contradiction of the worker rule.** Workers are NEVER SendMessage-resumed — retries are always fresh dispatches, because a resumed worker's completion routes to the main session, not its dispatcher. The foreman is different precisely because *you* spawned it: its completion routes back to you.
+
+**STATE line — mandatory.** The final sentence of every foreman visible turn is:
+
+```
+STATE: integrated <sha> · tally <n>/<cap> · next <unit>
+```
+
+When the process dies, the last result blob is often the only thing the orchestrator receives — the breadcrumb is a rule, not luck.
+
+**Plan changes mid-run:** you MAY inject or amend units in a live foreman via SendMessage. The message must carry a **full dispatch-contract unit spec** (objective, context, done-criteria, output format, depth) and an **explicit new global dispatch cap** — never "also do this" without re-stating the cap.
 
 ## Model routing
 

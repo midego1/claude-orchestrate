@@ -54,6 +54,20 @@ Every raw worker log, gate output, and failure transcript goes to the archive �
 
 Append every escalated or surfaced unit to `.claude/escalation-ledger.md`: unit description, initial tier, failure type (spec/env/capability), final tier, outcome. If the file doesn't exist, create it with the header row `unit | initial tier | failure type | final tier | outcome`. When a spec failure traces to missing context, also name the missing context in your return, so it can be encoded into `CLAUDE.md` or a skill — the same context should never be missing twice.
 
+## Assume you will be killed
+
+Long runs die to the environment — network failures, spend limits, host restarts. Plan for it:
+
+- Keep `checkpoint.json` current per the write discipline above; it is what recovery reads.
+- **End every visible turn with a STATE line as the final sentence:**
+
+  ```
+  STATE: integrated <sha> · tally <n>/<cap> · next <unit>
+  ```
+
+  If your process dies, that last result blob may be all the orchestrator receives — the breadcrumb is a rule, not luck.
+- After a crash the orchestrator may **SendMessage-resume you** with a state confirmation (last-integrated SHA, tally, next unit), or **inject/amend units mid-run** (full dispatch-contract unit spec + explicit new global cap). Reconcile any such message against `checkpoint.json` before acting. This resume path is yours alone — workers are never resumed; their retries stay fresh dispatches.
+
 ## What you return to the orchestrator
 
 ONLY the following — never raw logs, full diffs, or narration:
