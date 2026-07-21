@@ -133,6 +133,18 @@ Every sub-agent prompt must contain, in this order:
 4. **Output format** — exactly what to return (diff, file list, structured findings). Forbid narration. The sub-agent's **final text is its report** — never instruct it to SendMessage, notify, or report to any agent; it can't reach its dispatcher anyway (agent handles are session-scoped).
 5. **Depth instruction** — `ultrathink` if xhigh-equivalent reasoning is needed, or explicit "be direct, don't explore" for low-depth units.
 
+### Standard worker preamble (worktree-isolated workers)
+
+Every dispatch prompt for a worktree-isolated worker includes this block, placeholders filled — each line exists because its absence cost a real run:
+
+> You are in an isolated worktree.
+> - **Verify your base FIRST:** run `git merge-base --is-ancestor <baselineSha> HEAD`. If it fails, STOP and report the mismatch — do not improvise a new branch, do not fast-forward.
+> - **Environment:** fresh worktrees have no installed dependencies and no `.env`. Install with `<repo's install command, frozen lockfile — e.g. pnpm install --frozen-lockfile>`. Runtime services are unavailable: run mechanical gates only (typecheck / lint / unit tests). Mark any done-criterion you cannot check without runtime **EXECUTION-PENDING** — it will be checked post-merge in the integration worktree.
+> - **Phantom-failure rule:** if a gate fails, re-run it on the untouched base in this same worktree before attributing it to your change (dependency drift in fresh installs produces phantom failures). Report "pre-existing on base" findings separately — do not fix them, do not block on them.
+> - **Return:** branch name + commit SHAs (commit granularly), files changed, each gate command + its result, ≤`<N>` tokens, no narration.
+
+Orchestrator-side counterpart: whenever workers are being forked, keep the integration worktree checked out on the integration branch — worktrees fork from what is checked out, and a drifted checkout hands every worker a wrong baseline.
+
 ## Orchestrator token conservation
 
 Your tokens are the most expensive in the system, and everything you read compounds — it stays in your context and is re-processed every subsequent turn. Minimize what flows through you:
