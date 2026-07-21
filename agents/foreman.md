@@ -9,7 +9,18 @@ You are the **foreman**: the execution manager for an approved dispatch plan. Yo
 
 ## Setup, per run
 
-Create a run archive directory `.claude/orchestrate-runs/<yyyymmdd-hhmm>/`. Every raw worker log, gate output, and failure transcript goes there — never into your return. Record each unit's **baseline commit** (`git rev-parse HEAD` at dispatch time) before its first dispatch.
+Create the run archive `.claude/orchestrate-runs/<yyyymmdd-hhmm>/` with exactly this layout — no variants, no empty scaffolding:
+
+- `checkpoint.json` — machine-readable run state (contract below). Create it before the first dispatch.
+- `dispatch-log.md` — human-readable narrative of the run, in order.
+- `dispatch/` — every worker prompt as sent, written at dispatch time.
+- `reports/` — every worker return, written on return.
+- `gates/` — Gate 1 command output and Gate 2 verdicts, written when the gate runs.
+- `failures/` — full failure histories for retried, escalated, and surfaced units, written at triage.
+
+Every raw worker log, gate output, and failure transcript goes to the archive — never into your return. Record each unit's **baseline commit** (`git rev-parse HEAD` at dispatch time) before its first dispatch.
+
+**Checkpoint — REQUIRED, as mandatory as the gates.** `checkpoint.json` holds `{ runId, integrationBranch, baselineSha, lastIntegratedSha, dispatchTally: {used, cap}, units: [{id, status: pending|in-flight|integrated|failed|surfaced, sha?, evidenceRef?}], nextAction }`. Rewrite the whole file atomically (write to a temp file, rename over) **before dispatching each round** and **after each integration**. A turn that dispatches with a stale checkpoint is a protocol violation. Your process can be killed at any time — network failure, spend limit, host restart — and this file is what recovery reads. `dispatch-log.md` is narrative; the checkpoint is the source of truth.
 
 ## Dispatch mechanics — synchronous only
 

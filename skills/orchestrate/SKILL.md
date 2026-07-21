@@ -24,7 +24,7 @@ You are the **orchestrator**. Your job is to decompose work, dispatch sub-agents
 4. **Verify tiered** — never read raw sub-agent output yourself as the first check:
    - **Gate 1 (mechanical, ~free):** done-criteria must be machine-checkable wherever possible — a passing test, a clean build, a clean lint run, a grep-checkable invariant, a diff limited to declared files, and where the change has runtime surface, an end-to-end check against a real dev environment. Run these as bash commands.
    - **Gate 2 (cheap review):** for output that can't be mechanically checked, dispatch a verifier **one tier below the producer, floor at haiku** (sonnet output → haiku verifier, opus output → sonnet verifier). Security- or correctness-critical output gets sonnet minimum regardless of producer. The verifier must return PASS/FAIL with **cited evidence** — specific test output, line numbers, or diff hunks proving each criterion. A verdict without evidence is a FAIL. Haiku verifies comparison-against-criteria; anything requiring judgment about what's *missing* (root cause vs. symptom, semantic equivalence, edge-case coverage) goes to sonnet.
-   - **Gate 3 (you):** only gate-passed, foreman-summarized output reaches you. You check cross-unit consistency and integration, not unit-level correctness. Gate results arrive as one line each **with an evidence reference** — the exact command run + exit code, or where the verifier verdict lives. Full logs and failure histories go to a run archive (`.claude/orchestrate-runs/`), referenced by path: auditable on demand without flowing through your context. Evidence bodies are attached only on FAIL.
+   - **Gate 3 (you):** only gate-passed, foreman-summarized output reaches you. You check cross-unit consistency and integration, not unit-level correctness. Gate results arrive as one line each **with an evidence reference** — the exact command run + exit code, or where the verifier verdict lives. Full logs and failure histories go to the run archive (layout and checkpoint contract below), referenced by path: auditable on demand without flowing through your context. Evidence bodies are attached only on FAIL.
    - **Ship gate:** before declaring the task done, run an automated review over the **integrated diff** — a code-review pass, plus a security review for anything touching auth, input handling, secrets, or infrastructure (use the host's review skills if available, e.g. `/code-review`; otherwise dispatch a T2 reviewer). Unit gates catch unit-level bugs; the ship gate catches what only exists after integration. Ship-gate findings get **one fix round** (dispatched as fresh units) and one re-review; anything still failing is surfaced to the user — never a fix/review loop.
    - Never trust a sub-agent's self-report of success. A claim of success without a gate-evidence reference is a FAIL — and this applies to foreman summaries too: a PASS line without its evidence reference is a FAIL.
 5. **Triage failures before escalating** — most failures are not capability failures:
@@ -33,6 +33,35 @@ You are the **orchestrator**. Your job is to decompose work, dispatch sub-agents
    - **Capability failure** (spec was correct and complete, model genuinely couldn't do it) → escalate, including the failed attempt and the failure reason in the new dispatch.
    - **How to tell:** reread the dispatch first — if a competent human would need a clarifying question, it's a spec failure. If the same check fails without the worker's change (flaky test, missing dep, merge conflict, timeout, permissions), it's an environment failure — unclear cases default here, since environment retries are cheapest. Only when the spec was unambiguous and the environment clean is it a capability failure.
 6. **Retry budget:** an *attempt* is one worker dispatch. Per unit, at most **3 dispatches**: the original, one same-tier retry (after a spec rewrite or environment fix), and one escalated attempt. An **escalation step** is a single bump — effort first if the model has headroom, otherwise the next model tier; a unit already at T3/max has nowhere to go and is surfaced instead. Re-decomposing a surfaced unit grants a fresh budget **once**; units descended from an already re-decomposed unit are surfaced, not retried. After the budget: stop and surface the unit to the user with the archive path to its full failure history. A surfaced unit parks only itself and units that depend on it — independent gate-passed units still ship; report clearly what shipped and what's parked. Never enter an escalation ladder.
+
+## Run archive and checkpoint
+
+Every run gets an archive at `.claude/orchestrate-runs/<run>/` with exactly this layout — no variants, no empty scaffolding:
+
+- `checkpoint.json` — machine-readable run state, the recovery source of truth. Created before the first dispatch.
+- `dispatch-log.md` — human-readable narrative of the run, in order. Narrative only — never the recovery source.
+- `dispatch/` — every worker prompt as sent, written at dispatch time.
+- `reports/` — every worker return, written on return.
+- `gates/` — Gate 1 command output and Gate 2 verdicts, written when the gate runs.
+- `failures/` — full failure histories for retried, escalated, and surfaced units, written at triage.
+
+**Checkpoint contract — REQUIRED.** `checkpoint.json` holds:
+
+```json
+{
+  "runId": "…",
+  "integrationBranch": "…",
+  "baselineSha": "…",
+  "lastIntegratedSha": "…",
+  "dispatchTally": { "used": 0, "cap": 0 },
+  "units": [
+    { "id": "…", "status": "pending|in-flight|integrated|failed|surfaced", "sha": "…", "evidenceRef": "…" }
+  ],
+  "nextAction": "…"
+}
+```
+
+(`sha` and `evidenceRef` are optional per unit.) Write discipline: the foreman rewrites the whole file atomically **before dispatching each round** and **after each integration**. Checkpoint-before-dispatch is as mandatory as the gates — a foreman turn that dispatches with a stale checkpoint is a protocol violation. When a process dies, recovery reads `checkpoint.json` first and the integration branch's git log second; the narrative log is for humans.
 
 ## Model routing
 
