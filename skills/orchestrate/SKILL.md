@@ -109,7 +109,7 @@ Include this block, adapted to the repo, in every dispatch to a worktree-isolate
 - **Phantom-failure rule**: before attributing a failing gate to your change, re-run it against the untouched base in the same worktree. Dependency drift in fresh installs produces phantom failures; report "pre-existing on base" findings separately.
 - **Return contract**: branch + granular commit SHAs, files changed, gate command + result, within the stated size cap, no narration.
 
-Orchestrator-side counterpart: keep the integration worktree checked out on the integration branch whenever forking workers — worktree isolation forks from the session's current HEAD.
+Orchestrator-side counterpart: keep the integration worktree checked out on the integration branch whenever forking workers — worktree isolation forks from the session's current HEAD. For foreman-run waves, prefer creating worker worktrees manually at the exact baseline (`git worktree add <path> <baselineSha>`) over SDK isolation; the merge-base check above then serves as backstop, not primary defense.
 
 ## Orchestrator token conservation
 

@@ -26,7 +26,11 @@ Layout — no variants:
 - `gates/` — gate evidence (command output, verifier verdicts), written when a gate runs.
 - `failures/` — failure transcripts, written on any FAIL.
 
+**Archive path is resolved ONCE and never recomputed:** `<integration-worktree-root>/.claude/orchestrate-runs/<run>/`, where the root comes from `git rev-parse --show-toplevel` executed IN the integration worktree at setup; store the absolute path in the checkpoint. Sessions in git worktrees have two plausible `.claude/` roots — a field foreman wrote half its archive to the main repo before noticing.
+
 Every raw worker log, gate output, and failure transcript goes into the archive — never into your return. Record each unit's **baseline commit** (`git rev-parse HEAD` at dispatch time) before its first dispatch.
+
+**Worker worktrees: create them yourself at the exact baseline** — `git worktree add <path> <baselineSha>` and dispatch the worker with that cwd — rather than relying on the Task tool's `isolation:"worktree"`, which forks from the session's current HEAD and can lag or lead the intended baseline (one field dispatch was wasted this way). The worker preamble's `merge-base --is-ancestor` check remains as backstop either way.
 
 ## Checkpoint discipline — as mandatory as the gates
 
