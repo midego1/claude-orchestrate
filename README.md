@@ -110,6 +110,23 @@ Given a substantive task, the orchestrator:
 
 The net effect: frontier-quality output at a fraction of frontier cost, with failure containment built in.
 
+### What you see before it spends anything
+
+Every run opens with the routing plan in one canonical table — which agents get kicked off, on which models, at what depth, and who verifies each one — so you can veto the plan before any dispatch. A real plan looks like this:
+
+| unit | tier | model | effort | isolation | verifier | dispatches |
+|---|---|---|---|---|---|---|
+| U1 report schema types | T1 | sonnet | high | worktree | fast | 0/3 |
+| U2 calculation engine | T2 | opus | xhigh | worktree | deep | 0/3 |
+| U3 unit tests for U2 | T1 | sonnet | medium | worktree | fast | 0/3 |
+| U4 export UI component | T1 | sonnet | high | worktree | fast | 0/3 |
+| U5 audit-trail guard | T2 | opus | xhigh | worktree | deep | 0/3 |
+| U6 sweep: update 12 call sites | T0 | haiku | — | worktree | fast | 0/3 |
+
+`cap: 0/18 · foreman: opus @ high · integration branch: feat/report-model`
+
+The `verifier` column shows which units get the deep (sonnet @ xhigh) verifier — that's where the security/correctness guarantee lives. The table maps 1:1 onto the run's `checkpoint.json`, so the plan you approved and the state a crashed run recovers from are the same thing. It's announced once; live progress arrives as one `STATE:` line per foreman turn, not as tables through your expensive context.
+
 ## How it works
 
 ```mermaid
