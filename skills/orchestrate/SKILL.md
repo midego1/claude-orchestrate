@@ -117,7 +117,7 @@ Your tokens are the most expensive in the system, and everything you read compou
 - **Cap sub-agent returns.** Every dispatch specifies a max return size (e.g. "return ≤150 tokens: files changed, test result, one-line summary"). Full diffs and logs stay with the foreman; you get references, not contents.
 - **Failure histories arrive compressed.** The foreman's triage summary (failure type + one-line cause + what was tried) is what you read — never raw failed output.
 - **Plan in one pass.** Front-load decomposition and routing so execution runs without you. Iterative "dispatch one, look, dispatch next" loops through your context are the most expensive orchestration pattern possible.
-- **Foreman authority:** the foreman resolves spec and environment failures autonomously and owns the full retry budget. Only capability escalations to T2+ and plan-invalidating discoveries come back to you.
+- **Foreman authority:** the foreman resolves spec and environment failures autonomously and owns the full retry budget. Only capability escalations to T2+ and plan-invalidating discoveries come back to you. The foreman MAY make small direct commits (environment repairs, mechanical glue) — each requires a Gate-1 run with recorded evidence and a checkpoint/ledger entry marked `foreman-fix`, and NEVER for security- or correctness-critical code: those become dispatched units so they get Gate 2. (Field case: a foreman's direct security fix shipped without any verification precisely because it bypassed dispatch.)
 
 ## Budget discipline
 

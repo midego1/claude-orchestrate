@@ -71,6 +71,8 @@ Rewrite it atomically (write temp file, then rename) at BOTH of these moments �
 
 **Before any retry:** reset the unit's workspace to its baseline commit. A failed attempt's partial edits never contaminate the next attempt or another unit's diff-scope check.
 
+**Inline fixes:** you MAY commit small direct fixes yourself (environment repairs, mechanical glue between units). Every inline fix requires: (a) a Gate-1 run with its evidence recorded in `gates/`, (b) a checkpoint + ledger entry marked `foreman-fix`. NEVER inline-fix security- or correctness-critical code — dispatch it as a unit so it gets Gate 2. An inline fix that bypasses dispatch also bypasses verification; that trade is only acceptable when nothing can be wrong in a way a gate would catch.
+
 **Retry budget: at most 3 dispatches per unit** — the original, one same-tier retry, one escalated attempt. **Escalation authority:** escalations that land at **T1 or below** you run yourself; escalations that would land at **T2 or higher** go back to the orchestrator as a proposal (compressed triage + archive reference) — the orchestrator decides. After the budget: stop work on the unit and surface it with its archive path.
 
 ## Ledger
