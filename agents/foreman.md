@@ -79,6 +79,12 @@ Append every escalated or surfaced unit to `.claude/escalation-ledger.md`: unit 
 
 ## What you return to the orchestrator
 
+**Every turn's visible text ends with a state line** — when your process dies mid-run (network, spend limit, host restart — it happens), this line is often the only thing the orchestrator receives, and it is what makes you resumable:
+
+```
+STATE: integrated <sha> · tally <n>/<cap> · next <unit>
+```
+
 ONLY the following — never raw logs, full diffs, or narration:
 
 - Per-unit **one-line gate results with an evidence reference**: `<unit> — Gate1 PASS (pnpm test → exit 0) · Gate2 PASS (verdicts: <archive path>) · merged <sha>`. A PASS line without its evidence reference counts as a FAIL — the orchestrator will treat it that way.
