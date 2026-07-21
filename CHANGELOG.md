@@ -2,6 +2,21 @@
 
 All notable changes to the orchestrate plugin. The update notifier reads this file — keep the **Why update** line on every release.
 
+## [0.5.0] — 2026-07-21
+
+Field-hardening release from a monitored two-wave production run (33 units, ~35 workers, 4 environmental foreman deaths, 3 ship-gate MAJORs caught, zero capability escalations).
+
+**Why update:** crash recovery becomes deterministic (mandatory `checkpoint.json` + documented foreman resume path + STATE line), dead-code UI slips are caught at Gate 1 (reachability grep), and workers stop rediscovering worktree environment facts (standard preamble incl. base-SHA fail-fast and the phantom-failure rule).
+
+- **Mandatory `checkpoint.json`** per run (schema in foreman.md): rewritten atomically before every dispatch round and after every integration; fixed archive layout (`dispatch-log.md`, `dispatch/`, `reports/`, `gates/`, `failures/`)
+- **Foreman lifecycle section**: orchestrator-level environment failures (network/spend-limit/host-restart) with a canonical recovery path — checkpoint first, SendMessage-resume the same foreman id, fresh foreman only as last resort; explicit exception to the worker-resume prohibition
+- **STATE line** ends every foreman turn (`STATE: integrated <sha> · tally <n>/<cap> · next <unit>`) — the crash breadcrumb is a rule, not luck
+- **Plan-change contract**: mid-run unit injection via SendMessage requires a full dispatch-contract spec + explicit new global cap
+- **Gate-1 reachability check** for UI units: every new component must be imported by a route-reachable file — typecheck, tests and verifiers all pass on dead code
+- **Standard worker preamble**: verify fork base with `git merge-base --is-ancestor` (fail fast, never improvise), mechanical-gates-only in fresh worktrees with runtime checks as EXECUTION-PENDING, phantom-failure re-run rule, capped return contract
+- **Foreman inline-fix policy**: allowed for env repairs/mechanical glue with Gate-1 evidence + `foreman-fix` ledger entry; security/correctness-critical code always dispatches as a unit (Gate 2)
+- Tier-distribution guideline qualified per work-type (spec-heavy builds legitimately run 40–50% T2); escalation-ledger headline is now "the same context should never be missing twice"; new "Load-bearing — do not soften" list
+
 ## [0.4.2] — 2026-07-17
 
 Fixes worker→foreman result routing, observed in a live run on v0.4.1: retried workers' completions escalated to the main session instead of the idle foreman, and workers trying to SendMessage the foreman failed (agent handles are session-scoped) — every retry result bounced through the orchestrator, the exact overhead the protocol exists to avoid.
