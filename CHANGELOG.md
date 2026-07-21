@@ -2,6 +2,20 @@
 
 All notable changes to the orchestrate plugin. The update notifier reads this file — keep the **Why update** line on every release.
 
+## [0.5.1] — 2026-07-21
+
+Second field report, from a third production wave that ran with the 0.5.0 rules injected via prompt while agent defs were still 0.4.2 — a natural experiment proving where discipline must live: prompt-carried rules eroded again (third foreman in a row wrote an empty archive), file- and agent-def-carried rules held.
+
+**Why update:** the checkpoint can no longer silently not-exist (atomic one-command archive seed + orchestrator first-status-check tripwire), archive paths stop landing in the wrong repo root (pinned via `git rev-parse --show-toplevel`), worker worktrees fork at the exact baseline (manual `git worktree add <sha>` preferred over SDK isolation), reachability now covers init/registration wiring (a dead-in-production drain loop passed every import grep), and the wind-down order that produced the cleanest pause of three runs is protocol.
+
+- Atomic archive seed command in both SKILL.md and foreman.md — dirs + seeded `checkpoint.json` + `dispatch-log.md` in one command; "dirs exist, files don't" is structurally impossible
+- Orchestrator checkpoint tripwire on first status check, with the field-proven corrective text
+- Archive path resolved once at the integration-worktree root, stored in the checkpoint, never recomputed
+- Manual worker worktrees at the exact baseline SHA; the preamble merge-base check demoted to backstop
+- Reachability ⊇ init contracts: stateful modules name their init site in done-criteria; the init-hook invocation is grep-verified at Gate 1
+- Wind-down lifecycle order (complete in-flight, integrate passers, surface without retrying, final checkpoint with resume plan, STATE line) + SendMessage next-tool-round delivery-latency caveat (~45 min in the field)
+- Skipped-Gate-2 units register a named final-gate spot-check; the global cap explicitly counts workers + verifiers + retries
+
 ## [0.5.0] — 2026-07-21
 
 Hardened against a real two-wave production run (33 units, ~35 workers across two foremen, 4 foreman process deaths — all environmental, zero capability escalations, 3 ship-gate MAJORs caught). Every change traces to observed field evidence.
