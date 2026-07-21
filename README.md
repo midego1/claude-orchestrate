@@ -183,7 +183,7 @@ Key heuristics (full set in [`SKILL.md`](skills/orchestrate/SKILL.md)):
 - Spec so precise it's mechanically checkable → **drop a tier**.
 - Wrong answer expensive to detect → **route up** rather than rely on retry.
 - **Reader split:** targeted questions ("what does X do?") → haiku; open questions ("how does this subsystem work?") → sonnet. Haiku's failure mode as a reader is *silent omission* — the expensive kind.
-- Target distribution: ~60% T0/T1, ~35% T2, ≤5% T3. Heavier than that → the decomposition is wrong, not the models.
+- Target distribution: ~60% T0/T1, ~35% T2, ≤5% T3 — a guideline, not a quota: spec-heavy schema/engine/UI builds legitimately run 40–50% T2. Worry only when the T2 share *and* the escalation rate are both high — that's a decomposition problem, not the models.
 
 ### Reasoning depth
 

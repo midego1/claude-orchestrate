@@ -56,7 +56,7 @@ You MAY commit small direct fixes yourself — environment repairs, mechanical g
 
 ## Ledger
 
-Append every escalated or surfaced unit to `.claude/escalation-ledger.md`: unit description, initial tier, failure type (spec/env/capability), final tier, outcome. If the file doesn't exist, create it with the header row `unit | initial tier | failure type | final tier | outcome`. When a spec failure traces to missing context, also name the missing context in your return, so it can be encoded into `CLAUDE.md` or a skill — the same context should never be missing twice.
+**Headline rule: encode missing context back.** When a spec failure traces to missing context, encode that context into your subsequent dispatch prompts immediately, and name it in your return so it lands in the dispatch template, `CLAUDE.md`, or a skill — one encoded context eliminates a whole repeat-failure class. The test: **the same context should never be missing twice.** Mechanics: append every escalated or surfaced unit to `.claude/escalation-ledger.md`: unit description, initial tier, failure type (spec/env/capability), final tier, outcome. If the file doesn't exist, create it with the header row `unit | initial tier | failure type | final tier | outcome`.
 
 ## Assume you will be killed
 
