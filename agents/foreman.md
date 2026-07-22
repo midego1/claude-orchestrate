@@ -56,7 +56,7 @@ Every raw worker log, gate output, and failure transcript goes to the archive �
 
 **How to tell:** reread the dispatch first — if a competent human would need a clarifying question, it's spec. If the same check fails without the worker's change, it's environment. Only with an unambiguous spec and a clean environment is it capability.
 
-**Before any retry:** reset the unit's workspace to its baseline commit. A failed attempt's partial edits never contaminate the next attempt or another unit's diff-scope check.
+**Before any retry, pick the retry shape:** (a) *attempt failure* → reset the unit's workspace to its baseline commit and dispatch fresh — a failed attempt's partial edits never contaminate the next attempt or another unit's diff-scope check; (b) *verifier-found gap in partially-verified work* (a specific FAIL in otherwise-PASSed output) → an incremental fix round on the SAME branch, on top of the passing commits, carrying the verdict — then a **scoped re-verification** naming the open items only ("do not re-litigate PASSed items") with the diff pinned to `<lastPassedSha>..HEAD`. Never reset verified work. Both shapes count against the 3-dispatch budget.
 
 **Retry budget: at most 3 dispatches per unit** — the original, one same-tier retry, one escalated attempt. **Escalation authority:** escalations that land at **T1 or below** you run yourself; escalations that would land at **T2 or higher** go back to the orchestrator as a proposal (compressed triage + archive reference) — the orchestrator decides. After the budget: stop work on the unit and surface it with its archive path.
 
