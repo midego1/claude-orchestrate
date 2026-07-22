@@ -2,6 +2,21 @@
 
 All notable changes to the orchestrate plugin. The update notifier reads this file — keep the **Why update** line on every release.
 
+## [0.5.2] — 2026-07-22
+
+Third field report, from a production wave (wave-3b) where harness capability changed between sessions: a freshly spawned foreman could not call Agent at all. The run finished anyway — the foreman staged everything, faked nothing, and execution moved up a level with zero re-analysis. This release makes that recovery the protocol instead of an improvisation.
+
+**Why update:** a foreman that cannot dispatch no longer stalls the run — a mandatory first-action preflight catches it immediately and a declared DIRECT degraded mode (foreman becomes planner, contracts on disk, checkpoint handed to the orchestrator) keeps the plan's full value; dispatch contracts now live in `dispatch/<unit>.md` with pointer prompts, so retries are free and contracts survive process death; a verifier-found gap in verified work gets an incremental fix round instead of discarding passing commits; and the orchestrator itself must re-derive state from disk after context compression — a field run nearly double-merged from remembered state.
+
+- Capability preflight: the foreman's FIRST tool action is a trivial synchronous Agent call; on error, verbatim report + staged state before any analysis rounds (F1)
+- Degraded DIRECT mode, named and specified: orchestrator runs the loop at any plan size; foreman-as-planner writes contracts + final-gate runbook to `dispatch/*.md`, checkpoints `dispatchMode: "DIRECT"`, hands over checkpoint ownership; blocked foremen never simulate a gate they cannot run — options with labeled integrity cost (F1)
+- File-referenced dispatch preferred: contract on disk, Agent prompt = pointer + execution sentence; retry = same pointer + verdict; inline stays fine for one-off small units (F2)
+- Tool availability is tested by calling, not searching: ToolSearch indexes deferred tools only — absence proves nothing about top-level tools (F3)
+- Worker preamble permits exactly one self-remedy: pure fast-forward to the baseline (reverse merge-base check, `--ff-only`, mandatory disclosure); everything else still stops (F4)
+- Two retry shapes: attempt failure → reset-to-baseline fresh dispatch; verifier-found gap in partially-verified work → incremental fix round on the same branch + scoped re-verification (named open items, diff pinned to `<lastPassedSha>..HEAD`); both count against the 3-dispatch budget (F5)
+- Integration guidance for ordered registries: expect same-slot claims from parallel units, keep-both + renumber; validate only invariants the consuming runner requires (F6)
+- Orchestrator recovery rule: after context compression/resume/interruption, re-derive run state from `checkpoint.json` + git log before any state-changing action — remembered state is a hypothesis, disk is fact (F7)
+
 ## [0.5.1] — 2026-07-21
 
 Second field report, from a third production wave that ran with the 0.5.0 rules injected via prompt while agent defs were still 0.4.2 — a natural experiment proving where discipline must live: prompt-carried rules eroded again (third foreman in a row wrote an empty archive), file- and agent-def-carried rules held.
