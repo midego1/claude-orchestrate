@@ -160,7 +160,7 @@ Every sub-agent prompt must contain, in this order:
 Every dispatch prompt for a worktree-isolated worker includes this block, placeholders filled — each line exists because its absence cost a real run:
 
 > You are in an isolated worktree.
-> - **Verify your base FIRST:** run `git merge-base --is-ancestor <baselineSha> HEAD`. If it fails, STOP and report the mismatch — do not improvise a new branch, do not fast-forward.
+> - **Verify your base FIRST:** run `git merge-base --is-ancestor <baselineSha> HEAD`. If it fails, exactly ONE self-remedy is permitted: when HEAD is an ancestor of the baseline (pure fast-forward — verify with the reverse check, `git merge-base --is-ancestor HEAD <baselineSha>`), you MAY `git merge --ff-only <baselineSha>` and MUST disclose the fast-forward in your report. Any other mismatch: STOP and report — do not improvise a new branch, do not merge.
 > - **Environment:** fresh worktrees have no installed dependencies and no `.env`. Install with `<repo's install command, frozen lockfile — e.g. pnpm install --frozen-lockfile>`. Runtime services are unavailable: run mechanical gates only (typecheck / lint / unit tests). Mark any done-criterion you cannot check without runtime **EXECUTION-PENDING** — it will be checked post-merge in the integration worktree.
 > - **Phantom-failure rule:** if a gate fails, re-run it on the untouched base in this same worktree before attributing it to your change (dependency drift in fresh installs produces phantom failures). Report "pre-existing on base" findings separately — do not fix them, do not block on them.
 > - **Return:** branch name + commit SHAs (commit granularly), files changed, each gate command + its result, ≤`<N>` tokens, no narration.
