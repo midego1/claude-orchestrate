@@ -88,6 +88,8 @@ Long orchestrations must assume the foreman process **will** be killed — netwo
 2. **SendMessage-resume the SAME foreman agent id** with a state confirmation: last-integrated SHA, dispatch tally, next unit. Its transcript context is intact — resume is cheap and reliable.
 3. **Only if resume fails**, spawn a fresh foreman seeded from the checkpoint.
 
+**The checkpoint serves the orchestrator too — disk before memory.** After any context compression, session resume, or interruption, re-derive run state from `checkpoint.json` plus the integration branch's `git log`/`git status` BEFORE your next state-changing action. Remembered state is a hypothesis; disk is fact — a field orchestrator acting on remembered "merges pending" nearly double-merged units the disk showed already integrated.
+
 **This is the exception, not a contradiction of the worker rule.** Workers are NEVER SendMessage-resumed — retries are always fresh dispatches, because a resumed worker's completion routes to the main session, not its dispatcher. The foreman is different precisely because *you* spawned it: its completion routes back to you.
 
 **STATE line — mandatory.** The final sentence of every foreman visible turn is:
