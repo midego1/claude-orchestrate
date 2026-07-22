@@ -69,11 +69,15 @@ Layout — no variants, no empty scaffolding:
 }
 ```
 
-(`sha` and `evidenceRef` are optional per unit.) Write discipline: the foreman rewrites the whole file atomically **before dispatching each round** and **after each integration**. Checkpoint-before-dispatch is as mandatory as the gates — a foreman turn that dispatches with a stale checkpoint is a protocol violation. When a process dies, recovery reads `checkpoint.json` first and the integration branch's git log second; the narrative log is for humans.
+(`sha` and `evidenceRef` are optional per unit. A top-level `"dispatchMode": "DIRECT"` appears only on a degraded-mode handoff — see Foreman lifecycle.) Write discipline: the foreman rewrites the whole file atomically **before dispatching each round** and **after each integration**. Checkpoint-before-dispatch is as mandatory as the gates — a foreman turn that dispatches with a stale checkpoint is a protocol violation. When a process dies, recovery reads `checkpoint.json` first and the integration branch's git log second; the narrative log is for humans.
 
 ## Foreman lifecycle: crashes, resume, plan changes
 
 Long orchestrations must assume the foreman process **will** be killed — network failures, spend limits, host session restarts. That is an **environment failure at the orchestrator level**: same triage class, one level up. Recover; don't re-plan.
+
+**Capability preflight:** harness capability changes between sessions — a foreman that could dispatch dozens of workers yesterday may get "No such tool available: Agent" today. The foreman's FIRST tool action each run is therefore a trivial Agent call (haiku, "reply OK", synchronous). If it errors, the foreman reports the verbatim error plus staged state immediately — before any analysis rounds, not after stalling on them.
+
+**Degraded mode — DIRECT with a planner foreman:** when the preflight shows foreman-dispatch is unavailable, you run the dispatch loop in **direct mode at any plan size**, and the foreman becomes a **planner**: it writes every dispatch contract and the final-gate runbook to `dispatch/*.md`, updates the checkpoint one last time (`"dispatchMode": "DIRECT"`), and hands checkpoint ownership to you. This split preserves nearly all foreman value — zero re-analysis when execution moves up a level. One conduct rule for any blocked foreman: stage everything, fake nothing — never simulate a gate you cannot run; report options with their integrity cost labeled ("Gate-2 would be self-review, NOT an independent verdict").
 
 **Checkpoint tripwire:** on your FIRST status check of any foreman run, verify `checkpoint.json` exists and is non-empty. If not, send this corrective immediately (field-proven where the original instruction was not): "Write checkpoint.json NOW reflecting current state (integrated units + SHAs, in-flight units, tally, nextAction), and rewrite it before every dispatch round and after every integration." Prompt-carried discipline erodes; verified files don't.
 
