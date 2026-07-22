@@ -151,6 +151,8 @@ Every sub-agent prompt must contain, in this order:
 4. **Output format** — exactly what to return (diff, file list, structured findings). Forbid narration. The sub-agent's **final text is its report** — never instruct it to SendMessage, notify, or report to any agent; it can't reach its dispatcher anyway (agent handles are session-scoped).
 5. **Depth instruction** — `ultrathink` if xhigh-equivalent reasoning is needed, or explicit "be direct, don't explore" for low-depth units.
 
+**The contract lives on disk — file-referenced dispatch is the preferred mechanism.** Write the full contract to `dispatch/<unit>.md` in the run archive; the Agent prompt is then a pointer plus the execution sentence: "read `<path>`, execute exactly, final text = report per the contract's output format." Worker quality is indistinguishable from inline prompts, the dispatcher's context stays lean, and the contract survives process death. A retry is the same pointer plus the verifier's verdict. Inline prompts remain acceptable for one-off small units.
+
 ### Standard worker preamble (worktree-isolated workers)
 
 Every dispatch prompt for a worktree-isolated worker includes this block, placeholders filled — each line exists because its absence cost a real run:
