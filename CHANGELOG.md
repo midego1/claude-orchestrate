@@ -4,18 +4,18 @@ All notable changes to the orchestrate plugin. The update notifier reads this fi
 
 ## [0.5.2] — 2026-07-22
 
-Third field report, from a production wave (wave-3b) where harness capability changed between sessions: a freshly spawned foreman could not call Agent at all. The run finished anyway — the foreman staged everything, faked nothing, and execution moved up a level with zero re-analysis. This release makes that recovery the protocol instead of an improvisation.
+Third field report (wave-3b): the harness revoked agent dispatch between sessions — a fresh foreman couldn't call Agent at all. The run finished anyway by moving execution up a level. This release makes that recovery the protocol.
 
-**Why update:** a foreman that cannot dispatch no longer stalls the run — a mandatory first-action preflight catches it immediately and a declared DIRECT degraded mode (foreman becomes planner, contracts on disk, checkpoint handed to the orchestrator) keeps the plan's full value; dispatch contracts now live in `dispatch/<unit>.md` with pointer prompts, so retries are free and contracts survive process death; a verifier-found gap in verified work gets an incremental fix round instead of discarding passing commits; and the orchestrator itself must re-derive state from disk after context compression — a field run nearly double-merged from remembered state.
+**Why update:** a foreman that can't dispatch no longer stalls the run — a first-action preflight catches it and a declared degraded mode keeps the plan's full value; dispatch contracts live on disk, so retries are free and survive crashes; a gap found in verified work no longer discards the verified part; and the orchestrator trusts disk over memory after context loss (a field run nearly double-merged from remembered state).
 
-- Capability preflight: the foreman's FIRST tool action is a trivial synchronous Agent call; on error, verbatim report + staged state before any analysis rounds (F1)
-- Degraded DIRECT mode, named and specified: orchestrator runs the loop at any plan size; foreman-as-planner writes contracts + final-gate runbook to `dispatch/*.md`, checkpoints `dispatchMode: "DIRECT"`, hands over checkpoint ownership; blocked foremen never simulate a gate they cannot run — options with labeled integrity cost (F1)
-- File-referenced dispatch preferred: contract on disk, Agent prompt = pointer + execution sentence; retry = same pointer + verdict; inline stays fine for one-off small units (F2)
-- Tool availability is tested by calling, not searching: ToolSearch indexes deferred tools only — absence proves nothing about top-level tools (F3)
-- Worker preamble permits exactly one self-remedy: pure fast-forward to the baseline (reverse merge-base check, `--ff-only`, mandatory disclosure); everything else still stops (F4)
-- Two retry shapes: attempt failure → reset-to-baseline fresh dispatch; verifier-found gap in partially-verified work → incremental fix round on the same branch + scoped re-verification (named open items, diff pinned to `<lastPassedSha>..HEAD`); both count against the 3-dispatch budget (F5)
-- Integration guidance for ordered registries: expect same-slot claims from parallel units, keep-both + renumber; validate only invariants the consuming runner requires (F6)
-- Orchestrator recovery rule: after context compression/resume/interruption, re-derive run state from `checkpoint.json` + git log before any state-changing action — remembered state is a hypothesis, disk is fact (F7)
+- **Capability preflight** — the foreman's first tool action is a trivial Agent call; on error, verbatim report immediately, no analysis rounds wasted
+- **DIRECT degraded mode** — no dispatch? The orchestrator runs the loop; the foreman becomes planner: contracts + final-gate runbook to `dispatch/*.md`, checkpoint handed over (`dispatchMode: "DIRECT"`). Blocked foremen never simulate a gate they can't run
+- **File-referenced dispatch** — the contract lives in `dispatch/<unit>.md`; the prompt is a pointer; a retry is the same pointer plus the verdict
+- **Call, don't search** — ToolSearch indexes deferred tools only; the only availability test is a real call
+- **One worker self-remedy** — a pure fast-forward to the baseline is allowed (`--ff-only`, disclosed); any other base mismatch still stops
+- **Two retry shapes** — attempt failure: reset + fresh dispatch; verifier-found gap in verified work: fix round on the same branch + scoped re-verify pinned to `<lastPassedSha>..HEAD`
+- **Ordered registries** — parallel units will claim the same slot; keep-both + renumber, and validate only what the consuming runner requires
+- **Disk before memory** — after context compression or resume, re-read `checkpoint.json` + git log before any state-changing action
 
 ## [0.5.1] — 2026-07-21
 
