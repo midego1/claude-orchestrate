@@ -2,6 +2,11 @@
 
 All notable changes to the orchestrate plugin. The update notifier reads this file — keep the **Why update** line on every release.
 
+## [Unreleased]
+
+- **No migration needed for Claude Opus 5 (or future model releases)** — the plugin routes every dispatch through Claude Code's model aliases (`haiku` / `sonnet` / `opus`), never pinned IDs like `claude-opus-4-8`. When Anthropic repoints an alias to a new release — as with Opus 5 — every tier, the foreman, and both verifiers pick it up automatically: no config change, no plugin update. The only pinned ID in the repo is the README's session-model recommendation (`claude-fable-5`), which is unaffected
+- Caveat for tuners: the routing heuristic "Sonnet at xhigh often matches Opus at high" was calibrated on the 4.x family — re-validate on a real run before leaning on it for 5-family routing decisions
+
 ## [0.5.3] — 2026-07-24
 
 Fourth field report: a ~60-dispatch production-readiness run (10-unit audit → 25 fix units in 3 waves → gates → ship-gate → PR) on v0.4.2 agents. Its P0 — a foreman without the Agent tool silently degrading to self-review and reporting green gates — was already closed by 0.5.2's capability preflight and DIRECT degraded mode; this release encodes everything else the run paid for.
