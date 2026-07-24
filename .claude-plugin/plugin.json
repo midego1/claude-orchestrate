@@ -1,6 +1,6 @@
 {
   "name": "orchestrate",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "description": "Multi-agent orchestration for Claude Code: decompose work, route each unit to the cheapest capable model, verify with evidence-gated checks, escalate only on genuine capability failures.",
   "author": {
     "name": "midego1",

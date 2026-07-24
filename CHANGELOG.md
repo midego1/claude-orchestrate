@@ -2,6 +2,21 @@
 
 All notable changes to the orchestrate plugin. The update notifier reads this file — keep the **Why update** line on every release.
 
+## [0.5.3] — 2026-07-24
+
+Fourth field report: a ~60-dispatch production-readiness run (10-unit audit → 25 fix units in 3 waves → gates → ship-gate → PR) on v0.4.2 agents. Its P0 — a foreman without the Agent tool silently degrading to self-review and reporting green gates — was already closed by 0.5.2's capability preflight and DIRECT degraded mode; this release encodes everything else the run paid for.
+
+**Why update:** shared-worktree runs stop corrupting each other's git state (one field `git stash` swept a concurrent worker's uncommitted work into an orphan stash), go/no-go gates stop lying from warm caches (a lint count swung 40–1800 with cache freshness, hiding the 2 real errors), and unverifiable failures stop burning escalations on attempts nothing can check.
+
+- **Foreman precondition stated where delegation is defined** — the foreman layer is valid only when the foreman can itself dispatch workers and verifiers; a non-dispatching foreman's PASSes are self-reviews and must be discarded
+- **Shared-worktree git hygiene** — a hard rule in every file-mutating dispatch prompt when writers share a tree: scoped `git add <path>` only, never `git add -A` / `git add .` / `git stash`; dependency adds reported for serial install, never a lockfile-rewriting full install under concurrency
+- **Post-wave tree audit** — after any wave of concurrent shared-tree writers: `git status`, `git stash list`, per-commit file scope — before the integration gate
+- **Concurrency ceiling for shared trees** — 2–3 file-mutating writers with disjoint declared file scopes; a 4th reliably produced build-cache contention and a phantom typecheck failure; read-only workers and verifiers exceed freely
+- **Cold go/no-go gates** — the final integration gate and ship gate clear build caches first (`.turbo`, package `dist`, `.cache`, `*tsbuildinfo*`), matching a fresh CI runner; per-unit gates may stay warm
+- **Verifiability-gap triage branch** — when the failure mode structurally can't be exercised by the repo's test infra, don't escalate the model (it buys another unverifiable attempt); reduce the unit to the verifiable subset, ship that, surface the remainder naming the missing test infra
+- **Verifier rationing encoded** — security- and data-loss-critical units always get a dedicated independent verifier; mechanical/config units ride the ship-gate review as their named spot-check
+- **Ship gate prefers host `/security-review`** — it reviews the branch diff directly with its own false-positive filtering and consumes zero dispatch budget
+
 ## [0.5.2] — 2026-07-22
 
 **Why update:** dispatch failures are caught up front and degrade gracefully instead of stalling the run; dispatch contracts persist on disk and retries reuse them; fixing a gap no longer discards already-verified work; recovery always reads state from disk.
