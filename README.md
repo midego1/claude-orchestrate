@@ -103,10 +103,13 @@ Given a substantive task, the orchestrator:
 
 1. **Decomposes** it into independent units, each with explicit inputs, outputs, and machine-checkable done-criteria.
 2. **Classifies** each unit into a complexity tier (T0–T3) and announces the routing plan as one compact table — before spending anything.
-3. **Hands execution to a foreman** (an Opus sub-agent) that dispatches workers in synchronous parallel waves, runs verification gates, triages failures, and manages retries — without the expensive top model in the loop. File-mutating workers each run in an **isolated git worktree** — forked from a verified baseline (workers check it with `git merge-base --is-ancestor` and fail fast rather than improvise), merged back one at a time with gates re-run after each merge — so parallel agents can't collide or silently build on the wrong base. (Plans of ≤3 units skip the foreman; the orchestrator runs the loop and the gates itself.)
-4. **Verifies everything through gates.** Mechanical checks first (tests, builds, grep invariants — free), then cheap verifier agents that must cite evidence. A verdict without evidence is a FAIL.
-5. **Escalates only real capability failures** — after triage rules out bad specs and broken environments — one step at a time (effort before model), capped at 3 dispatches per unit and a global dispatch cap for the plan.
-6. **Integrates** gate-passed results, checks cross-unit consistency, runs a final **ship gate** — automated code review plus security review over the integrated diff — and ships.
+3. **Hands execution to a foreman** (an Opus sub-agent) that dispatches workers in synchronous parallel waves, runs verification gates, triages failures, and manages retries — without the expensive top model in the loop. Its first act is a **capability preflight**: one real dispatch proving it can spawn workers at all. If it can't, the foreman becomes a *planner* — every dispatch contract and the final-gate runbook written to disk — and the orchestrator runs the loop itself. Direct mode skips the foreman, never the gates — and plans of ≤3 units run in that same direct mode by design.
+4. **Isolates file-mutating work.** Each writer gets a git worktree created at the exact baseline SHA, re-checks its own base, and fails fast rather than improvising a branch; passed units merge back one at a time with gates re-run after each merge. Where isolation isn't available, concurrent writers share the tree under a hard git-hygiene rule — scoped `git add <path>` only, never `git add -A` or `git stash` — with a ceiling of 2–3 writers holding disjoint file scopes, and a tree audit after every wave.
+5. **Verifies everything through gates.** Mechanical checks first (tests, builds, grep invariants, plus reachability greps proving new code is imported *and* init-wired — free), then cheap verifier agents that must cite evidence. A verdict without evidence is a FAIL. Go/no-go gates run **cold**, with build caches cleared, because a warm cache misreports both error counts and causes.
+6. **Escalates only real capability failures** — after triage rules out bad specs, broken environments, and failure modes the repo's test infrastructure structurally can't exercise — one step at a time (effort before model), capped at 3 dispatches per unit and a global dispatch cap for the plan.
+7. **Integrates** gate-passed results, checks cross-unit consistency, runs a final **ship gate** — automated code review plus security review over the integrated diff, preferring your host's own `/security-review` when it has one — and ships.
+
+Every run is **checkpointed**: state lands in `checkpoint.json` before each dispatch round and after each integration, so a foreman killed by a network drop, a spend limit, or a host restart resumes from disk instead of restarting the plan.
 
 The net effect: frontier-quality output at a fraction of frontier cost, with failure containment built in.
 
@@ -125,7 +128,7 @@ Every run opens with the routing plan in one canonical table — which agents ge
 
 `cap: 0/18 · foreman: opus @ high · integration branch: feat/report-model`
 
-The `verifier` column shows which units get the deep (sonnet @ xhigh) verifier — that's where the security/correctness guarantee lives. The table maps 1:1 onto the run's `checkpoint.json`, so the plan you approved and the state a crashed run recovers from are the same thing. It's announced once; live progress arrives as one `STATE:` line per foreman turn, not as tables through your expensive context.
+The `verifier` column shows which units get the deep (sonnet @ xhigh) verifier — that's where the security/correctness guarantee lives. Verification is rationed against the cap deliberately: security- and data-loss-critical units always get a dedicated independent verifier, while mechanical and config units ride the ship-gate review instead, recorded as named spot-checks rather than silently skipped. The table maps 1:1 onto the run's `checkpoint.json`, so the plan you approved and the state a crashed run recovers from are the same thing. It's announced once; live progress arrives as one `STATE:` line per foreman turn, not as tables through your expensive context.
 
 ## How it works
 
@@ -138,39 +141,43 @@ flowchart TB
     end
 
     subgraph EXEC["&nbsp;⚙️ EXECUTE — cheap volume, parallel in isolated worktrees&nbsp;"]
+        PF{{"<b>Capability preflight</b> — first tool action<br/>one real Agent call: can the foreman dispatch?"}}
         F["<b>Foreman</b> — opus @ high<br/>dispatch loop · failure triage<br/>max 3 dispatches per unit · baseline commit recorded"]
         W0["<b>T0 — haiku</b><br/>lookups · fan-out reads<br/>boilerplate · exact-spec edits"]
         W1["<b>T1 — sonnet</b><br/>spec'd implementation<br/>tests · docs · small refactors"]
         W2["<b>T2 — opus</b><br/>cross-file refactors · root-cause<br/>security-sensitive code"]
+        PF -->|"yes"| F
         F --> W0 & W1 & W2
     end
 
     subgraph VERIFY["&nbsp;✅ VERIFY — evidence or it didn't happen&nbsp;"]
-        G1{{"<b>Gate 1 — mechanical, ~free</b><br/>tests · build · lint · e2e · diff vs baseline"}}
+        G1{{"<b>Gate 1 — mechanical, ~free</b><br/>tests · build · lint · e2e · diff vs baseline<br/>reachability: imported <i>and</i> init-wired"}}
         G2{{"<b>Gate 2 — cited evidence required</b><br/>verifier-fast (haiku): criteria comparison<br/>verifier-deep (sonnet @ xhigh): MISSING defects too"}}
-        MERGE["<b>Integrate</b><br/>merge passed units back sequentially<br/>Gate 1 re-run after each merge"]
+        MERGE["<b>Integrate</b><br/>merge passed units back sequentially<br/>Gate 1 re-run after each merge, caches cleared"]
     end
 
     G3["<b>Gate 3 — orchestrator</b><br/>cross-unit consistency · PASS + evidence ref per unit<br/><b>ship gate:</b> code + security review of the integrated diff<br/>(one fix round, then surface)"]
-    AR[("run archive<br/>.claude/orchestrate-runs/<br/>raw logs · failure histories")]
+    AR[("run archive · .claude/orchestrate-runs/<br/><b>checkpoint.json</b> — recovery source of truth<br/>raw logs · gate output · failure histories")]
 
     YOU -->|"substantive task"| O
-    O -->|"dispatch plan + global cap<br/>(units · tiers · done-criteria)"| F
+    O -->|"dispatch plan + global cap<br/>(units · tiers · done-criteria)"| PF
+    PF -. "no → DIRECT mode: foreman becomes planner<br/>(contracts + final-gate runbook to disk),<br/>orchestrator runs the loop — gates unchanged" .-> O
     W0 & W1 & W2 -->|"commit + branch/SHA"| G1
     G1 -->|"not mechanically<br/>checkable"| G2
     G1 --> MERGE
     G2 --> MERGE
-    G2 -. "FAIL → triage: spec? env? capability?<br/>reset to baseline · retry / escalate one step" .-> F
-    F -.->|"raw logs, referenced not inlined"| AR
+    G2 -. "FAIL → triage: spec? env? verifiability gap? capability?<br/>attempt failure → reset to baseline, fresh dispatch<br/>gap in verified work → fix round on the same branch + scoped re-verify" .-> F
+    F -. "capability escalation landing at T2+ · plan-invalidating discovery<br/>(compressed triage + archive reference)" .-> O
+    F <-. "checkpoint rewritten before every dispatch and after every integration<br/>logs referenced, never inlined · crash recovery reads it first, git log second" .-> AR
     MERGE --> G3
     G3 -->|"integrated result:<br/>what shipped · what's parked"| YOU
 ```
 
-*Plans of ≤3 units skip the foreman — the orchestrator dispatches and runs the gates itself. Everything else in the picture is unchanged.*
+*Plans of ≤3 units skip the foreman — the orchestrator dispatches and runs the gates itself. Same shape as the DIRECT-mode path above: direct mode skips the foreman, never the gates.*
 
 *Worker results flow back **synchronously** by design (v0.4.2): workers are parallel `Agent` tool calls inside one foreman message, dispatched with `run_in_background: false` (background is the harness default), so every result — first attempts and retries alike — returns inline as a tool result. No background workers, no completion-notification routing, no worker→foreman messaging: a sub-agent's background children stop notifying it once it idles (their results escalate to the main session), and agent handles are session-scoped, so a worker can't message its dispatcher anyway. Only the foreman itself may run in the background — the orchestrator spawned it, so its completion notification routes back correctly.*
 
-### The three ideas that carry the design
+### The four ideas that carry the design
 
 **1. Failure triage before escalation.** Most sub-agent failures are *not* capability failures. The foreman triages in strict order:
 
@@ -179,12 +186,15 @@ flowchart TB
 | **Spec failure** | Ambiguous criteria, missing context, wrong assumption in the dispatch | Rewrite the dispatch, retry **same** tier — escalating a bad spec buys an expensive wrong answer |
 | **Environment failure** | Flaky test, missing dep, wrong branch, stale state | Fix the environment, retry same tier |
 | **Capability failure** | Spec was correct and complete; the model genuinely couldn't do it | Escalate **one** tier (effort first, then model), passing the failed attempt along |
+| **Verifiability gap** | The failure mode structurally can't be exercised by the repo's test infrastructure | Do **not** escalate — a stronger model buys another unverifiable attempt. Ship the verifiable subset, surface the rest naming the missing test infra |
 
 Hard cap: **at most 3 dispatches per unit** — the original, one same-tier retry, one escalated attempt — under a **global dispatch cap** for the whole plan (default 3× unit count). After that the unit is surfaced with a reference to its archived failure history; independent passed units still ship. No escalation ladders, ever.
 
 **2. Evidence-gated verification.** No sub-agent's self-report of success is ever trusted — and that includes summaries: every PASS travels with a reference to its evidence (the command + exit code, or where the verdict lives), archived per run under `.claude/orchestrate-runs/`. Verifiers must return PASS/FAIL *per criterion* with cited evidence — specific test output, line numbers, diff hunks. "Looks correct" is a FAIL. The deep verifier additionally reports what is **missing** relative to the spec (dedicated `MISSING` lines): unhandled edge cases, symptom patches masquerading as root-cause fixes, semantically inequivalent rewrites.
 
 **3. Orchestrator token conservation.** Everything the top model reads stays in its context and is re-processed every subsequent turn. So the orchestrator never reads files (readers summarize instead — haiku for targeted extraction, sonnet for open-ended comprehension), every dispatch caps its return size, failure histories arrive compressed, and planning happens in one pass rather than dispatch-look-dispatch loops.
+
+**4. Disk before memory.** Long runs get killed — network drops, spend limits, host restarts. That's an *environment* failure one level up: recover, don't re-plan. So run state is a file, not a memory: `checkpoint.json` is rewritten atomically before every dispatch round and after every integration, and dispatching against a stale checkpoint is a protocol violation on par with skipping a gate. Recovery reads the checkpoint first and the integration branch's `git log` second, then resumes the *same* foreman — its transcript is intact — with a fresh one only as fallback. The same rule binds the orchestrator: after any context compression or interruption, it re-derives state from disk before its next state-changing action. Remembered state is a hypothesis; disk is fact.
 
 ### Model routing
 
@@ -265,7 +275,7 @@ Every release in [CHANGELOG.md](CHANGELOG.md) carries a one-line *Why update* so
 
 Two artifacts appear in **your** repo when orchestrating:
 
-- **`.claude/escalation-ledger.md`** — every escalated or surfaced unit (`unit | initial tier | failure type | final tier | outcome`), created on first use. This is the system's feedback loop: it shows where the routing table is mis-calibrated. If more than a third of units escalate in a session, the decomposition or the specs are the problem — not the models.
+- **`.claude/escalation-ledger.md`** — every escalated or surfaced unit (`unit | initial tier | failure type | final tier | outcome`), created on first use. This is the system's feedback loop: it shows where the routing table is mis-calibrated. Its headline rule is **encode missing context back** — when a spec failure traces to context the worker never had, that context goes into the dispatch template, `CLAUDE.md`, or the skill, because logging it isn't enough: the same context should never be missing twice. If more than a third of units escalate in a session, the decomposition or the specs are the problem — not the models.
 - **`.claude/orchestrate-runs/<timestamp>/`** — the run archive: `checkpoint.json` (machine-readable run state — the crash-recovery source of truth, rewritten before every dispatch round and after every integration), `dispatch-log.md` (human narrative), and `dispatch/`, `reports/`, `gates/`, `failures/` for raw prompts, worker returns, gate outputs, and failure histories — referenced (not inlined) in what flows back to the orchestrator. This is how PASS lines stay one-line *and* auditable, and how a killed foreman resumes instead of restarting. Gitignore it if you don't want run logs in history.
 
 ## FAQ
