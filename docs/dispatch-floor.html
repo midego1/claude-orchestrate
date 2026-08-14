@@ -1,0 +1,790 @@
+<title>The Dispatch Floor</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root{
+    --paper:#d8d2af;
+    --paper-hi:#e4dec1;
+    --paper-lo:#cfc8a2;
+    --ink:#27251a;
+    --ink-soft:#5c5941;
+    --accent:#a13a1e;
+    --line-faint:rgba(39,37,26,.14);
+    --mono:ui-monospace,"SF Mono","Cascadia Mono",Menlo,Consolas,"Liberation Mono",monospace;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%}
+  body{
+    background:var(--paper);
+    color:var(--ink);
+    font-family:var(--mono);
+    font-size:13px;
+    line-height:1.55;
+    overflow:hidden;
+  }
+  button{font-family:var(--mono);cursor:pointer}
+  button:focus-visible,[tabindex]:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+  mark{background:var(--ink);color:var(--paper-hi);padding:0 4px}
+
+  #app{display:grid;grid-template-rows:auto 1fr;height:100vh}
+
+  /* ── header: title block strip ─────────────────────────────── */
+  header{
+    display:flex;align-items:stretch;gap:0;
+    border-bottom:1.5px solid var(--ink);
+    background:var(--paper);
+    overflow-x:auto;white-space:nowrap;flex-shrink:0;
+  }
+  .stat{padding:8px 18px 9px 14px;border-right:1px solid var(--line-faint)}
+  .stat .k{font-size:9.5px;letter-spacing:.14em;color:var(--ink-soft);text-transform:uppercase}
+  .stat .v{font-size:14px;margin-top:1px}
+  .hdr-btns{margin-left:auto;display:flex;align-items:center;gap:8px;padding:0 14px}
+  .hdr-btns button{
+    background:var(--paper);border:1.5px solid var(--ink);color:var(--ink);
+    padding:6px 12px;font-size:11px;letter-spacing:.1em;text-transform:uppercase;
+  }
+  .hdr-btns button:hover{background:var(--ink);color:var(--paper-hi)}
+  .hdr-btns button.armed{background:var(--ink);color:var(--paper-hi)}
+
+  /* ── main 3-pane ───────────────────────────────────────────── */
+  #main{display:grid;grid-template-columns:236px 1fr 384px;min-height:0}
+
+  /* left index rail */
+  #rail{border-right:1.5px solid var(--ink);overflow-y:auto;padding:10px 0 30px;background:var(--paper)}
+  .grp{padding:12px 12px 2px;font-size:9.5px;letter-spacing:.16em;color:var(--ink-soft);text-transform:uppercase}
+  .row{
+    display:flex;align-items:center;gap:8px;width:100%;text-align:left;
+    background:none;border:none;border-left:3px solid transparent;
+    padding:5px 10px 5px 11px;color:var(--ink);font-size:12px;
+  }
+  .row:hover{background:var(--paper-lo)}
+  .row.sel{border-left-color:var(--accent);background:var(--paper-lo)}
+  .row .cc{
+    flex:none;width:26px;height:17px;border:1px solid var(--ink);
+    display:inline-flex;align-items:center;justify-content:center;
+    font-size:9.5px;letter-spacing:.03em;background:var(--paper-hi);
+  }
+  .row.sel .cc,.row:hover .cc{background:var(--ink);color:var(--paper-hi)}
+  .row .nm{flex:1;line-height:1.3}
+  .row .md{flex:none;font-size:9px;color:var(--ink-soft)}
+
+  /* canvas */
+  #stage{position:relative;min-width:0;background:var(--paper);overflow:hidden}
+  #stage svg{display:block;width:100%;height:100%;cursor:grab;touch-action:none}
+  #stage svg.panning{cursor:grabbing}
+  #zoomer{position:absolute;top:12px;right:12px;display:flex;flex-direction:column;gap:5px}
+  #zoomer button{width:26px;height:26px;border:1.5px solid var(--ink);background:var(--paper);font-size:14px;line-height:1}
+  #zoomer button:hover{background:var(--ink);color:var(--paper-hi)}
+  #hints{
+    position:absolute;left:0;right:0;bottom:0;padding:6px 14px;
+    font-size:10px;letter-spacing:.08em;color:var(--ink-soft);text-transform:uppercase;
+    border-top:1px solid var(--line-faint);background:var(--paper);
+    display:flex;gap:18px;overflow-x:auto;white-space:nowrap;
+  }
+  #tip{
+    position:absolute;pointer-events:none;display:none;max-width:280px;
+    background:var(--ink);color:var(--paper-hi);padding:7px 10px;font-size:11px;line-height:1.45;z-index:5;
+  }
+  #tip b{display:block;font-size:11px;letter-spacing:.05em}
+
+  /* right reading panel */
+  #panel{border-left:1.5px solid var(--ink);display:flex;flex-direction:column;min-height:0;background:var(--paper)}
+  #tabs{display:flex;flex-shrink:0;border-bottom:1.5px solid var(--ink)}
+  #tabs button{
+    flex:1;padding:9px 4px;font-size:10px;letter-spacing:.14em;text-transform:uppercase;
+    background:var(--paper);border:none;border-right:1px solid var(--line-faint);color:var(--ink-soft);
+  }
+  #tabs button.on{background:var(--ink);color:var(--paper-hi)}
+  #pbody{overflow-y:auto;padding:18px 20px 40px}
+  #pbody h1{font-size:21px;font-weight:600;line-height:1.25;letter-spacing:-.01em;text-wrap:balance}
+  #pbody .eyebrow{font-size:9.5px;letter-spacing:.18em;color:var(--ink-soft);text-transform:uppercase;margin-bottom:6px}
+  #pbody .sub{color:var(--ink-soft);font-size:12px;margin-top:4px}
+  #pbody h2{
+    font-size:10px;letter-spacing:.16em;text-transform:uppercase;color:var(--ink-soft);
+    border-bottom:1px solid var(--ink);padding-bottom:4px;margin:22px 0 10px;font-weight:600;
+  }
+  #pbody p{margin:0 0 12px;max-width:62ch}
+  #pbody table{width:100%;border-collapse:collapse;font-size:11.5px;margin:0 0 12px}
+  #pbody td{border-top:1px solid var(--line-faint);padding:5px 8px 5px 0;vertical-align:top}
+  #pbody td:first-child{color:var(--ink-soft);white-space:nowrap;padding-right:12px}
+  #pbody code{background:var(--paper-lo);padding:1px 4px;font-size:11px}
+  .nodehead{display:flex;align-items:flex-start;gap:10px;margin-bottom:4px}
+  .nodehead .cc{
+    flex:none;min-width:32px;height:24px;padding:0 5px;border:1.5px solid var(--ink);background:var(--ink);color:var(--paper-hi);
+    display:inline-flex;align-items:center;justify-content:center;font-size:12px;margin-top:3px;
+  }
+  .backlink{background:none;border:none;color:var(--ink-soft);font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;padding:0;margin-bottom:14px;text-decoration:underline}
+  .backlink:hover{color:var(--accent)}
+  .stepnav{display:flex;gap:8px;margin-top:16px}
+  .stepnav button{border:1.5px solid var(--ink);background:var(--paper);padding:6px 12px;font-size:11px;text-transform:uppercase;letter-spacing:.08em}
+  .stepnav button:hover:not(:disabled){background:var(--ink);color:var(--paper-hi)}
+  .stepnav button:disabled{opacity:.35;cursor:default}
+  .stepct{font-size:10px;letter-spacing:.14em;color:var(--accent);text-transform:uppercase;margin-bottom:6px}
+  .modeline{font-size:10.5px;color:var(--ink-soft);border:1px dashed var(--ink-soft);padding:6px 9px;margin:0 0 14px}
+
+  /* ── SVG map styling ───────────────────────────────────────── */
+  .gridline{stroke:var(--line-faint);stroke-width:1}
+  .region{fill:none;stroke:var(--ink-soft);stroke-width:1;stroke-dasharray:2 4}
+  .glabel{font-size:10px;letter-spacing:.2em;fill:var(--ink-soft);text-transform:uppercase}
+  .edge path{fill:none;stroke:var(--ink);stroke-width:1.3;stroke-linejoin:round}
+  .edge.fb path{stroke:var(--ink-soft);stroke-width:1.1;stroke-dasharray:5 4}
+  .edge .joint{fill:var(--ink)}
+  .edge.fb .joint{fill:var(--ink-soft)}
+  .edge.hi path{stroke:var(--accent);stroke-width:2}
+  .edge.hi .joint{fill:var(--accent)}
+  .elabel{font-size:9.5px;fill:var(--ink-soft);paint-order:stroke;stroke:var(--paper);stroke-width:3.5px;stroke-linejoin:round}
+  .edge.hi + g .elabel{fill:var(--accent)}
+  .node{cursor:pointer}
+  .node polygon{stroke:var(--ink);stroke-width:1;stroke-linejoin:round}
+  .f-top{fill:var(--paper-hi)}
+  .f-l{fill:var(--paper)}
+  .f-r{fill:var(--paper-lo)}
+  .h-l{fill:url(#hL)}
+  .h-r{fill:url(#hR)}
+  .h-t{fill:none}
+  .node .chip rect{fill:var(--paper-hi);stroke:var(--ink);stroke-width:1.2}
+  .node .chip text{font-size:10.5px;fill:var(--ink);letter-spacing:.02em}
+  .node.hi polygon,.node.sel polygon{stroke-width:1.7}
+  .node.hi .chip rect,.node.sel .chip rect{fill:var(--ink)}
+  .node.hi .chip text,.node.sel .chip text{fill:var(--paper-hi)}
+  .node.sel .f-top{stroke:var(--accent);stroke-width:2}
+  .dimmed{opacity:.16}
+  .pulse{fill:var(--accent)}
+  svg text{font-family:var(--mono);user-select:none}
+
+  @media (max-width:1080px){
+    body{overflow:auto}
+    #app{height:auto;grid-template-rows:auto auto}
+    #main{grid-template-columns:1fr;grid-template-rows:62vh auto}
+    #rail{display:none}
+    #stage{border-bottom:1.5px solid var(--ink)}
+    #panel{border-left:none;max-height:none}
+    #pbody{max-height:none}
+  }
+</style>
+
+<div id="app">
+  <header>
+    <div class="stat"><div class="k">Repository</div><div class="v">claude-orchestrate · v0.5.4</div></div>
+    <div class="stat"><div class="k">Agent roles</div><div class="v">3 + your session</div></div>
+    <div class="stat"><div class="k">Model tiers</div><div class="v">4 · T0–T3</div></div>
+    <div class="stat"><div class="k">Gates</div><div class="v">3 + ship gate</div></div>
+    <div class="stat"><div class="k">Retry budget</div><div class="v">3 / unit</div></div>
+    <div class="stat"><div class="k">Global cap</div><div class="v">3× units</div></div>
+    <div class="hdr-btns">
+      <button id="btnFlow">▶ Pause the flow</button>
+      <button id="btnTrace">Trace one step</button>
+      <button id="btnReset">Reset view</button>
+    </div>
+  </header>
+
+  <div id="main">
+    <nav id="rail" aria-label="Component index"></nav>
+
+    <div id="stage">
+      <svg id="map" role="img" aria-label="Isometric map of the claude-orchestrate protocol: an orchestrator decomposes a task into a routing plan, a foreman dispatches tiered workers in isolated worktrees, three verification gates and a ship gate check everything with evidence, and run state lives on disk in a checkpoint and archive."></svg>
+      <div id="zoomer"><button id="zin" aria-label="Zoom in">+</button><button id="zout" aria-label="Zoom out">−</button></div>
+      <div id="tip"></div>
+      <div id="hints">
+        <span>hover to read</span><span>click to pin</span><span>drag to pan</span><span>scroll to zoom</span><span>height = model cost · dashed = feedback</span>
+      </div>
+    </div>
+
+    <aside id="panel">
+      <div id="tabs">
+        <button id="tabWhat" class="on">What it does</button>
+        <button id="tabHow">How it's built</button>
+      </div>
+      <div id="pbody"></div>
+    </aside>
+  </div>
+</div>
+
+<script>
+'use strict';
+/* ───────────────────────── data ───────────────────────── */
+
+const NODES=[
+ // PLAN
+ {id:'you',code:'Y',name:'You — the session',grp:'plan',model:'—',x:0,y:3,w:1.1,d:1.1,h:.7,
+  hover:'One routing table before any spend; one STATE line per foreman turn after that.',
+  meta:[['role','approves the plan, receives the result'],['sees','routing table · STATE lines · final report']],
+  body:['You hand the session a substantive task — one that splits into more than ~3 independent units, spans several files, or benefits from parallel workers. Trivial turns skip all of this by design: orchestration overhead would exceed the task.',
+        'Before anything is spent you see the full routing plan as one table — every unit, its tier, model, effort, isolation, verifier, and retry counter — and you can veto it. After that, progress arrives as a single STATE line per foreman turn, never as tables through your expensive context. At the end: what shipped and what’s parked.']},
+ {id:'orch',code:'O',name:'Orchestrator',grp:'plan',model:'fable @ xhigh',x:2.4,y:1.6,w:2,d:2,h:2.7,
+  hover:'The session model. Decomposes, classifies, routes, integrates — and never reads files.',
+  meta:[['model','your session model — Fable 5 @ xhigh recommended'],['source','skills/orchestrate/SKILL.md'],['keeps for itself','plan · routing · escalation calls · semantic merges · the decision to ship']],
+  body:['The model you select in Claude Code is the orchestrator. Its whole job is judgment: decompose the task into units with machine-checkable done-criteria, classify each into a tier (T0–T3), announce the plan, and integrate what comes back. A bad plan at the top causes escalation cascades below — which is why the frontier model sits here and nowhere else.',
+        'Its tokens are the most expensive in the system, and everything it reads is re-processed on every later turn. So it never reads files or raw logs: readers summarize instead (haiku for targeted extraction, sonnet for open-ended comprehension), every dispatch caps its return size, and failure histories arrive compressed.']},
+ {id:'plan',code:'P',name:'Routing plan',grp:'plan',model:'one table',x:5.6,y:1.7,w:2,d:1.7,h:.35,kind:'slab',
+  hover:'The canonical table — unit · tier · model · effort · isolation · verifier · dispatches — announced before anything runs.',
+  meta:[['budget','3 dispatches per unit · global cap 3× unit count'],['maps 1:1','onto checkpoint.json’s units array']],
+  body:['Nothing dispatches before the table is announced. One row per unit — tier, model, effort, worktree isolation, which verifier guards it, and a 0/3 dispatch counter — plus one cap line naming the global budget, the foreman, and the integration branch.',
+        'The table maps one-to-one onto the run’s checkpoint.json, so the plan you approved and the state a crashed run recovers from are the same thing. The verifier column is where the security guarantee lives: critical units always get the deep verifier; mechanical ones ride the ship-gate review as named spot-checks instead.']},
+ // EXECUTE
+ {id:'pre',code:'PF',name:'Capability preflight',grp:'exec',model:'1 real call',x:8.5,y:1.7,w:1.2,d:1.2,h:1,
+  hover:'The foreman’s first tool action: one real Agent call proving it can spawn workers at all.',
+  meta:[['the test','haiku, “reply OK”, synchronous'],['on failure','foreman becomes a planner; orchestrator runs DIRECT mode']],
+  body:['Harness capability changes between sessions — a foreman that dispatched dozens of workers yesterday may get “No such tool available: Agent” today. So the foreman’s first tool action is one trivial real dispatch. Tool availability is tested by calling, not searching: a field foreman once “proved” the Agent tool missing via exhaustive ToolSearch queries; only the real call produced the real error.',
+        'If the call fails, the foreman fakes nothing: it becomes a planner — writes every dispatch contract and the final-gate runbook to disk, marks the checkpoint DIRECT, and hands the loop to the orchestrator. Direct mode skips the foreman, never the gates.']},
+ {id:'fore',code:'F',name:'Foreman',grp:'exec',model:'opus @ high',x:7.7,y:4.5,w:2,d:2,h:2,
+  hover:'Execution manager: dispatch loop, gates, triage, retries — keeps the frontier model out of the loop.',
+  meta:[['model','opus @ high'],['source','agents/foreman.md'],['used for','plans of 6+ units — 5 or fewer run direct'],['authority','resolves spec + env failures itself; T2+ escalations go up']],
+  body:['The foreman receives the approved plan and runs the loop so the expensive model doesn’t have to: dispatch synchronous parallel waves, run Gate 1 itself, dispatch Gate 2 verifiers, triage failures, manage retries inside the budget, and merge passed units back one at a time. Workers are always synchronous Agent calls issued in a single message — a sub-agent’s background children stop notifying it the moment it idles, so background worker dispatch is forbidden.',
+        'Every visible turn ends with a STATE line carrying a terminal token — STOPPED-AWAITING-RESUME or COMPLETED — because a foreman notification always means it stopped: there is no notification for “still working.” A round-end report once read as “still running” cost a field run 16 idle minutes, then 43.']},
+ {id:'wt',code:'WT',name:'Isolated worktrees',grp:'exec',model:'git',x:10.9,y:1.2,w:2.7,d:7,h:.28,kind:'platform',chip:[.25,6.7],
+  hover:'Every writer gets a worktree forked at the exact baseline SHA — parallel work without collisions.',
+  meta:[['baseline','git worktree add <path> <baselineSha> — manual, never from a drifted HEAD'],['worker’s first move','git merge-base --is-ancestor check; mismatch → stop, don’t improvise'],['fallback','shared tree: max 2–3 writers, disjoint scopes, scoped git add only']],
+  body:['File-mutating workers run in git worktrees created at the exact baseline commit. Each worker verifies its own base before touching anything and fails fast rather than improvising a branch; it commits granularly and returns branch + SHA, not just file paths.',
+        'Where isolation isn’t available, concurrent writers share the tree under a hard hygiene rule — scoped git add <path> only, never git add -A or git stash (a field worker’s bare stash once swept a concurrent worker’s uncommitted changes into an orphan stash) — with a ceiling of 2–3 writers and a full tree audit after every wave.']},
+ {id:'w0',code:'T0',name:'T0 workers — haiku',grp:'exec',model:'haiku',x:11.5,y:1.9,w:1.4,d:1.4,h:.7,base:.28,
+  hover:'Mechanical volume: lookups, fan-out reads, boilerplate, exact-spec edits.',
+  meta:[['tier','T0 — mechanical'],['reader rule','targeted, checkable questions only — haiku’s failure mode is silent omission']],
+  body:['The cheapest tier does the volume: file and symbol lookups, grep-style exploration, fan-out reads across dozens of files, renaming, formatting, boilerplate, exact-spec single-file edits, and criteria-checkable verification.',
+        'Routing heuristic: if the spec is so precise that correctness is mechanically checkable, drop the unit a tier. Targeted questions go to haiku; open-ended comprehension goes to sonnet — haiku’s failure mode as a reader is silent omission, the expensive kind.']},
+ {id:'w1',code:'T1',name:'T1 workers — sonnet',grp:'exec',model:'sonnet',x:11.5,y:4.1,w:1.4,d:1.4,h:1.3,base:.28,
+  hover:'Standard implementation from a clear spec: features, tests, docs, small refactors.',
+  meta:[['tier','T1 — standard'],['cheap lever','sonnet @ xhigh often matches opus @ high at a fraction of the cost']],
+  body:['Sonnet takes implementation from a clear spec: features, tests, bug fixes with a known root cause, docs, refactors scoped to one to three files, API integration following an existing pattern.',
+        'Effort is a second, cheaper lever than model choice — bump effort before model. Target distribution across a plan: roughly 60% T0/T1, 35% T2, ≤5% T3 — a guideline for spotting under-specified plans, not a quota.']},
+ {id:'w2',code:'T2',name:'T2 workers — opus',grp:'exec',model:'opus',x:11.5,y:6.3,w:1.4,d:1.4,h:2,base:.28,
+  hover:'Cross-file refactors, root-cause hunts, security-sensitive code.',
+  meta:[['tier','T2 — complex'],['T3 above it','fable — rare; usually the orchestrator IS the frontier tier']],
+  body:['Opus takes what needs breadth: multi-file refactors holding cross-file context, root-cause investigation of non-obvious bugs, critical-path review, migration planning, concurrency logic, and anything security-sensitive — code touching credentials is routed up-tier by design, never asked of a cheap model.',
+        'A T3 (fable) tier exists for units needing long autonomous investigation under unclear constraints, but it’s rare: usually the orchestrator itself is the frontier reasoning and T2 suffices below it.']},
+ // VERIFY
+ {id:'g1',code:'G1',name:'Gate 1 — mechanical',grp:'verify',model:'bash · ~free',x:11.2,y:9.8,w:2.5,d:2.3,h:.4,kind:'slab',
+  hover:'Tests, build, lint, diff scope, reachability greps. Go/no-go gates run with caches cleared.',
+  meta:[['checks','exact test cmd · build · lint · diff vs baseline · e2e where possible'],['reachability','new code must be imported AND init-wired — tests pass on dead code'],['cold rule','go/no-go gates clear .turbo, dist, .cache, *tsbuildinfo* first']],
+  body:['The first gate is free and decisive: run the actual done-criteria as bash — the exact test command, the build, lint, a diff-scope check against the recorded baseline. For UI units, a grep proving each new component is imported by a route-reachable file; for stateful modules, that their init hook is invoked from the composition root — a field outbox once passed every import grep while its drain loop sat dead in production.',
+        'Authoritative gates run cold: cached lint output is actively misleading, not just stale — a field run’s error count swung between 40 and 1800 with cache freshness, burying the 2 real errors and propagating a wrong diagnosis into several dispatch prompts.']},
+ {id:'vf',code:'V1',name:'verifier-fast',grp:'verify',model:'haiku',x:15.1,y:9.6,w:1.2,d:1.2,h:.7,
+  hover:'PASS/FAIL per criterion, cited evidence required. “Looks correct” is a FAIL.',
+  meta:[['model','haiku'],['source','agents/verifier-fast.md'],['output','one line per criterion: PASS|FAIL — evidence: …']],
+  body:['For output that can’t be mechanically checked, a cheap independent verifier compares it against the done-criteria — one line per criterion, each with cited evidence: specific test output, line numbers, diff hunks. A verdict without evidence is a FAIL by rule; so is “looks correct.”',
+        'Verifiers are read-only and never take the worker’s own claims as evidence. The routing rule: a verifier runs one tier below its producer, floor at haiku — verifying against a good spec is cheaper than producing.']},
+ {id:'vd',code:'V2',name:'verifier-deep',grp:'verify',model:'sonnet @ xhigh',x:15,y:11.5,w:1.5,d:1.5,h:1.3,
+  hover:'For judgment calls — also reports what’s MISSING relative to the spec.',
+  meta:[['model','sonnet @ xhigh'],['source','agents/verifier-deep.md'],['extra output','MISSING lines — defects the criteria don’t cover']],
+  body:['Security- and correctness-critical output gets the deep verifier: the same evidence-per-criterion contract, plus a dedicated output slot for what the criteria don’t cover — MISSING lines naming unhandled edge cases, symptom patches masquerading as root-cause fixes, semantically inequivalent rewrites.',
+        'This is where the guarantee lives, and it’s rationed deliberately under the global cap: critical units always get it; mechanical units ride the ship-gate review as named spot-checks instead — skips must surface somewhere, never silently.']},
+ {id:'tri',code:'X',name:'Failure triage',grp:'verify',model:'foreman logic',x:7.9,y:9.9,w:1.6,d:1.6,h:1.1,
+  hover:'Most failures aren’t capability failures. Spec → rewrite. Env → fix. Only then escalate — one step.',
+  meta:[['order','spec → environment → capability → verifiability gap'],['budget','3 dispatches per unit, hard · re-decompose grants fresh budget once'],['escalation','one step: effort first, then model — never a ladder']],
+  body:['Before any escalation the foreman triages in strict order. Spec failure (a competent human would need a clarifying question) → rewrite the dispatch, retry the same tier — escalating a bad spec buys an expensive wrong answer. Environment failure (flaky test, missing dep, stale state; unclear cases default here) → fix it, retry same tier. Only with a clean spec and a clean environment is it a capability failure — escalate one step, effort before model.',
+        'The fourth verdict is the subtle one: a verifiability gap, where the repo’s test infrastructure structurally can’t exercise the failure mode. Escalating buys another equally unverifiable attempt — instead, ship the verifiable subset and surface the rest, naming the missing test infra.']},
+ {id:'mrg',code:'M',name:'Integrate',grp:'verify',model:'sequential',x:10.9,y:13.5,w:1.8,d:1.7,h:.9,
+  hover:'Passed units merge back one at a time; Gate 1 re-runs after every merge.',
+  meta:[['order','sequential, never batch'],['per merge','Gate 1 re-run — caches cleared on go/no-go'],['conflicts','semantic resolution goes up to the orchestrator']],
+  body:['Gate-passed branches merge back into the integration branch one at a time, with mechanical checks re-run after each merge — two units that each pass alone can still break together, and a batch merge can’t tell you which one did it.',
+        'Merge conflicts aren’t resolved by the foreman: semantic conflict resolution is orchestrator judgment. When parallel units extend an ordered registry (a migration journal, an enum), same-slot claims are expected — resolved by keep-both + renumber.']},
+ {id:'g3',code:'G3',name:'Gate 3 — orchestrator',grp:'verify',model:'session model',x:7.3,y:13.8,w:1.6,d:1.6,h:1.6,
+  hover:'Cross-unit consistency. One PASS line per unit, each with an evidence reference.',
+  meta:[['checks','cross-unit consistency + integration — not unit-level correctness'],['rule','a PASS line without its evidence reference is a FAIL, foreman summaries included']],
+  body:['Only gate-passed, foreman-summarized output reaches the orchestrator: one line per unit with a reference to its evidence — the command and exit code, or where the verdict lives in the archive. Full logs never flow through frontier context; they stay auditable on demand by path.',
+        'Gate 3 checks what only the top can check: cross-unit consistency and integration. No sub-agent’s self-report of success is ever trusted — and that includes the foreman’s own summaries.']},
+ {id:'ship',code:'SG',name:'Ship gate',grp:'verify',model:'code + security review',x:4.1,y:14,w:1.8,d:1.7,h:1.4,
+  hover:'Automated code review + security review over the integrated diff. One fix round, then surface.',
+  meta:[['scope','the integrated diff — what only exists after integration'],['security half','prefers the host’s own /security-review'],['cap','one fix round + one re-review — never a fix/review loop']],
+  body:['Before anything is declared done, an automated review runs over the integrated diff — a code-review pass plus a security review for anything touching auth, input handling, secrets, or infrastructure. Unit gates catch unit bugs; the ship gate catches what only exists after integration.',
+        'Findings get exactly one fix round (dispatched as fresh units) and one re-review. Anything still failing is surfaced to you — a fix/review loop is how budgets die.']},
+ // DISK
+ {id:'ck',code:'C',name:'checkpoint.json',grp:'disk',model:'disk',x:1.2,y:8.6,w:1.7,d:1.6,h:.45,kind:'slab',
+  hover:'The recovery source of truth — rewritten atomically before every dispatch round.',
+  meta:[['written','before every dispatch round · after every integration · atomically'],['holds','units + SHAs · dispatch tally · owner lease (epoch) · stall count · open worktrees · nextAction'],['rule','disk before memory — remembered state is a hypothesis']],
+  body:['Long runs stop before the plan is done — killed by network drops or spend limits, or, more often, the foreman simply ending its own turn. So run state is a file, not a memory. Dispatching against a stale checkpoint is a protocol violation on par with skipping a gate.',
+        'The owner field is a dispatch lease: a take-over bumps its epoch, and every dispatcher re-checks the epoch at the checkpoint read it already owes — so a watchdog false-positive can’t put two dispatchers on one plan. nextAction: complete is how a finished run is told apart from a stopped one. Disk decides, never the report’s tone.']},
+ {id:'arc',code:'A',name:'Run archive',grp:'disk',model:'orchestrate-runs/',x:.7,y:11.2,w:2.2,d:2.2,kind:'stack',
+  hover:'Every prompt, worker return, gate output, and failure history — referenced, never inlined.',
+  meta:[['layout','dispatch/ · reports/ · gates/ · failures/ + checkpoint.json + dispatch-log.md'],['created','one atomic setup command — dirs and seeded files together']],
+  body:['Each run gets a timestamped archive: every worker prompt as sent, every return, every gate output, every failure history. PASS lines stay one line and auditable because evidence lives here and travels by reference — full logs never flow through frontier context.',
+        'Setup is one atomic command — directories plus seeded checkpoint together — because three field foremen in a row created empty dirs and wrote zero files while the instruction lived in prose. An archive of empty dirs carries zero recovery value, and is now impossible.']},
+ {id:'led',code:'L',name:'Escalation ledger',grp:'disk',model:'ledger.md',x:4.2,y:11,w:1.5,d:1.4,h:.35,kind:'slab',
+  hover:'Every escalated unit, recorded — and missing context encoded back so it’s never missing twice.',
+  meta:[['row','unit · initial tier · failure type · final tier · outcome'],['headline rule','encode missing context back into templates, CLAUDE.md, or the skill']],
+  body:['Every escalated or surfaced unit lands in the ledger — the system’s feedback loop, showing where the routing table is mis-calibrated. If more than a third of units escalate, the decomposition or the specs are the problem, not the models.',
+        'Its headline rule is the highest-value move in the protocol: when a spec failure traces to context the worker never had, that context is encoded into the dispatch template, CLAUDE.md, or the skill. Logging it isn’t enough — the same context should never be missing twice.']},
+ {id:'wd',code:'W',name:'Stall watchdog',grp:'disk',model:'timer',x:3.4,y:5.3,w:1.2,d:1.2,h:.8,
+  hover:'A foreman that stops without notifying leaves nothing to notice — so a timer checks the disk.',
+  meta:[['decisive','checkpoint mtime stale ~20 min AND no file writes ~5 min'],['advisory','a build/test process running — look once more, never a veto'],['repeat stalls','restart intensity: 1 resume per window (OTP-style), then take the loop over']],
+  body:['For runs past ~30 minutes, a recurring check watches for silent stops: harness agent status if available, otherwise two decisive disk signals — stale checkpoint and no file writes — plus one advisory. The asymmetry is deliberate: a false positive costs one idempotent resume message; a false negative once cost 43 idle minutes.',
+        'Recovery resumes the same foreman first (its transcript is intact), a fresh one only as fallback. Repeat stalls use restart intensity, not a lifetime count: one resume per phase-window; a second stall in the same window means the orchestrator takes the loop — fencing the old foreman out via the ownership epoch.']},
+ // PLUGIN
+ {id:'sk',code:'SK',name:'The skill',grp:'plugin',model:'skills/orchestrate/',x:16.6,y:1.2,w:1.7,d:1.7,h:1.2,
+  hover:'The full protocol, loaded into your session — decomposition, routing, gates, triage, budgets.',
+  meta:[['file','skills/orchestrate/SKILL.md'],['activates','auto on substantive tasks · /orchestrate any time'],['escape hatch','trivial task → skip the protocol, work directly']],
+  body:['The skill is the protocol: the core loop, the routing tables, the gates, the triage order, the dispatch contract, the checkpoint contract, and the budget discipline — loaded into whatever session model you run.',
+        'It triggers on substantive tasks (more than ~3 independent units, multi-file, parallelizable) and deliberately stays out of the way on trivial turns; a one-line nudge in CLAUDE.md makes auto-activation far more reliable.']},
+ {id:'ag',code:'AG',name:'Agent definitions',grp:'plugin',model:'3 files',x:17,y:3.7,w:1.5,d:1.5,h:1,
+  hover:'foreman, verifier-fast, verifier-deep — models and effort pinned in frontmatter.',
+  meta:[['agents/foreman.md','opus @ high'],['agents/verifier-fast.md','haiku'],['agents/verifier-deep.md','sonnet @ xhigh'],['aliases','haiku/sonnet/opus — a repointed alias upgrades every tier, no config change']],
+  body:['Three sub-agent definitions ship with the plugin, each a markdown file with its model and reasoning effort pinned in frontmatter — so the foreman is always opus and the verifiers always cheap, regardless of what your session runs.',
+        'Every dispatch routes through Claude Code’s model aliases, never pinned IDs — when Anthropic repoints an alias to a new release, every tier picks it up automatically.']},
+ {id:'hk',code:'HK',name:'Update notifier',grp:'plugin',model:'SessionStart',x:17.3,y:6.1,w:1.3,d:1.3,h:.6,
+  hover:'Tells you when a newer version exists and why it matters. Never installs anything.',
+  meta:[['files','hooks/hooks.json + scripts/check-update.sh'],['behavior','≤1 check/hour · read-only · fail-silent']],
+  body:['A SessionStart hook compares your installed version against the repo at most once an hour and, when a newer release exists, prints the version jump, the changelog’s one-line “Why update,” and the exact update command.',
+        'It is read-only and fail-silent — no network, no notice, no breakage — and it never installs anything; updates stay under your explicit control.']},
+ {id:'po',code:'PO',name:'Portable edition',grp:'plugin',model:'any agent',x:17.6,y:8.4,w:1.7,d:1.6,h:.9,
+  hover:'The same protocol for Codex, Cursor, Gemini CLI, Copilot, Aider — as repo instructions.',
+  meta:[['file','portable/orchestrator.md'],['goes in','AGENTS.md · .cursor/rules · GEMINI.md · copilot-instructions.md · CONVENTIONS.md']],
+  body:['The protocol is model- and agent-agnostic; only the plumbing is Claude Code-specific. The portable edition expresses routing as capability tiers you map onto any provider’s lineup, with fallbacks for agents missing primitives — no nested sub-agents, no per-dispatch model choice, no parallelism.',
+        'What survives everywhere: decompose → machine-checkable done-criteria → evidence gates → failure triage → hard retry budget.']}
+];
+
+const EDGES=[
+ {id:'e1', kind:'main',pts:[[0.55,3.55],[3.4,3.55],[3.4,2.6]],label:'substantive task',lab:[1.15,4.15]},
+ {id:'e2', kind:'main',pts:[[3.4,2.6],[6.6,2.55]],label:'decompose · classify',lab:[4.35,1.95]},
+ {id:'e3', kind:'main',pts:[[6.6,2.55],[9.1,2.3]],label:'announced before spend',lab:[6.9,3.35]},
+ {id:'e4', kind:'main',pts:[[9.1,2.3],[8.7,5.5]],label:'≥6 units → hand off',lab:[10.35,3.3]},
+ {id:'e5', kind:'fb',  pts:[[9.1,2.3],[9.1,0.3],[3.4,0.3],[3.4,1.6]],label:'can’t dispatch → DIRECT mode',lab:[5.2,-0.35]},
+ {id:'e6', kind:'main',pts:[[8.7,5.5],[10.3,5.5],[10.3,2.6],[12.2,2.6]]},
+ {id:'e7', kind:'main',pts:[[8.7,5.5],[12.2,4.8]],label:'synchronous parallel waves',lab:[9.05,6.75]},
+ {id:'e8', kind:'main',pts:[[8.7,5.5],[10.3,5.5],[10.3,7],[12.2,7]]},
+ {id:'e9', kind:'main',pts:[[12.2,2.6],[14.3,2.6],[14.3,10],[12.45,10.95]]},
+ {id:'e10',kind:'main',pts:[[12.2,4.8],[14.3,4.8],[14.3,10],[12.45,10.95]]},
+ {id:'e11',kind:'main',pts:[[12.2,7],[14.3,7],[14.3,10],[12.45,10.95]],label:'commit + branch SHA',lab:[15.05,6.7]},
+ {id:'e12',kind:'main',pts:[[12.45,10.95],[15.7,10.2]],label:'not mechanically checkable',lab:[12.75,9.35]},
+ {id:'e13',kind:'main',pts:[[12.45,10.95],[15.75,12.25]]},
+ {id:'e14',kind:'main',pts:[[12.45,10.95],[11.8,14.35]],label:'PASS',lab:[11.6,12.45]},
+ {id:'e15a',kind:'main',pts:[[15.7,10.2],[17.1,10.55],[17.1,15.35],[11.8,14.9]]},
+ {id:'e15b',kind:'main',pts:[[15.75,12.25],[15.75,14.75],[11.8,14.55]],label:'PASS + evidence',lab:[14.5,15.6]},
+ {id:'e16',kind:'fb',  pts:[[12.45,10.95],[8.7,10.7]],label:'FAIL + verdict',lab:[9.8,11.55]},
+ {id:'e17',kind:'fb',  pts:[[8.7,10.7],[8.7,5.5]],label:'retry ≤3 · escalate one step',lab:[9.55,8.55]},
+ {id:'e18',kind:'fb',  pts:[[8.7,10.7],[4.95,11.7]],label:'recorded',lab:[6.3,11.85]},
+ {id:'e19',kind:'fb',  pts:[[7.7,5],[5.4,5],[5.4,3],[4.4,3]],label:'T2+ escalation only',lab:[4.85,5.05]},
+ {id:'e20',kind:'main',pts:[[8.3,6.5],[8.3,8.2],[2.05,8.2],[2.05,9.4]],label:'checkpoint rewritten every round',lab:[3.75,7.5]},
+ {id:'e21',kind:'main',pts:[[2.05,9.4],[1.8,12.3]],label:'lives in the archive',lab:[.35,10.15]},
+ {id:'e22',kind:'fb',  pts:[[4.6,5.9],[7.7,5.9]],label:'stalled? resume · take over (epoch++)',lab:[3.6,6.95]},
+ {id:'e23',kind:'main',pts:[[11.8,14.35],[8.1,14.6]],label:'integrated diff',lab:[9.45,13.95]},
+ {id:'e24',kind:'main',pts:[[8.1,14.6],[5,14.85]],label:'cross-unit PASS',lab:[5.7,15.55]},
+ {id:'e25',kind:'main',pts:[[5,14.85],[-1.3,14.85],[-1.3,3.55],[0.55,3.55]],label:'what shipped · what’s parked',lab:[-2.15,9.0]},
+ {id:'e26',kind:'fb',  pts:[[17.45,2.05],[17.45,-0.9],[2.9,-0.9],[2.9,1.6]],label:'loads at session start',lab:[9.6,-1.55]}
+];
+
+const GROUPS=[
+ {id:'plan',  label:'Plan — frontier tokens'},
+ {id:'exec',  label:'Execute — cheap volume'},
+ {id:'verify',label:'Verify — evidence or FAIL'},
+ {id:'disk',  label:'State on disk'},
+ {id:'plugin',label:'Ships in the plugin'}
+];
+
+const REGIONS=[
+ {pts:[[16.2,.5],[19.7,.5],[19.7,10.5],[16.2,10.5]],label:'ships in the plugin',lab:[16.25,.15]},
+ {pts:[[.3,8],[6.2,8],[6.2,13.9],[.3,13.9]],label:'state on disk',lab:[.35,7.65]}
+];
+
+const GLABELS=[
+ {t:'plan',pos:[0.1,1.1]},
+ {t:'execute',pos:[10.95,.75]},
+ {t:'verify',pos:[10.5,12.55]}
+];
+
+const STEPS=[
+ {t:'A substantive task',n:['you','orch'],e:['e1'],
+  x:'Orchestration triggers when a task splits into more than ~3 independent units, spans multiple files, or benefits from parallel workers. Trivial turns skip the whole protocol — and /orchestrate forces it any time.'},
+ {t:'Decompose & classify',n:['orch'],e:['e2'],
+  x:'The session model — the only frontier tokens in the system — breaks the task into independent units, each with explicit inputs, outputs, and machine-checkable done-criteria, then classifies each into a tier: T0 haiku, T1 sonnet, T2 opus, T3 fable (rare).'},
+ {t:'The routing table',n:['plan'],e:['e2','e3'],
+  x:'Before anything is spent, the whole plan is announced as one table — unit, tier, model, effort, isolation, verifier, and a 0/3 dispatch counter — plus the global cap (3× unit count). You can veto it. The rows map 1:1 onto checkpoint.json.'},
+ {t:'Capability preflight',n:['pre','fore'],e:['e3','e4','e5'],
+  x:'Plans of 6+ units go to an opus foreman — but only after its first tool action proves it can dispatch at all: one real haiku Agent call. If that fails, the foreman becomes a planner and the orchestrator runs the loop itself. Direct mode skips the foreman, never the gates.'},
+ {t:'Dispatch waves',n:['fore','w0','w1','w2'],e:['e6','e7','e8'],
+  x:'The foreman dispatches synchronous parallel waves — multiple Agent calls in one message, results returning inline. Each unit runs on the cheapest model that can reliably do it. Background workers are forbidden: their completions escalate past an idle dispatcher.'},
+ {t:'Worktree isolation',n:['wt','w0','w1','w2'],e:[],
+  x:'Every file-mutating worker gets a git worktree forked at the exact baseline SHA and verifies its own base before touching anything. Shared-tree fallback: 2–3 writers max, disjoint file scopes, scoped git add only — never git add -A, never git stash.'},
+ {t:'Gate 1 — mechanical',n:['g1'],e:['e9','e10','e11'],
+  x:'Workers return branch + commit SHA, and the actual done-criteria run as bash: tests, build, lint, diff scope vs baseline, reachability greps proving new code is imported and init-wired. Go/no-go gates run cold — caches cleared — because a warm cache misreports both counts and causes.'},
+ {t:'Gate 2 — evidence',n:['vf','vd'],e:['e12','e13'],
+  x:'What can’t be mechanically checked goes to a verifier that must cite evidence per criterion — test output, line numbers, diff hunks. A verdict without evidence is a FAIL. verifier-deep additionally reports MISSING defects the criteria don’t cover; critical units always get it.'},
+ {t:'Failure triage',n:['tri','led'],e:['e16','e17','e18'],
+  x:'Before any escalation: spec failure → rewrite, same tier. Environment failure → fix, same tier. Only a clean spec plus a clean environment makes a capability failure — escalate one step, effort before model. Verifiability gaps never escalate. Hard cap: 3 dispatches per unit.'},
+ {t:'Disk before memory',n:['ck','arc','wd'],e:['e20','e21','e22'],
+  x:'checkpoint.json is rewritten atomically before every dispatch round — a stopped foreman leaves no shell variables behind. A stall watchdog reads the disk on runs past ~30 minutes; recovery resumes the same foreman, and an ownership epoch keeps two dispatchers off one plan.'},
+ {t:'Integrate',n:['mrg'],e:['e14','e15a','e15b'],
+  x:'Gate-passed branches merge back one at a time, with Gate 1 re-run after every merge — two units that pass alone can still break together. Semantic merge conflicts go up to the orchestrator.'},
+ {t:'Gate 3 + ship gate',n:['g3','ship','you'],e:['e23','e24','e25'],
+  x:'The orchestrator checks cross-unit consistency — every PASS line carrying an evidence reference — then a ship gate reviews the integrated diff for code and security issues. Findings get one fix round, one re-review. Then: what shipped, what’s parked, and why.'}
+];
+
+/* ───────────────────────── iso rendering ───────────────────────── */
+
+const TW=44,TH=22,ZH=26;
+const iso=(x,y,z=0)=>[(x-y)*TW,(x+y)*TH-z*ZH];
+const pt=p=>p[0].toFixed(1)+','+p[1].toFixed(1);
+const poly=(pts,cls)=>`<polygon class="${cls}" points="${pts.map(pt).join(' ')}"/>`;
+const esc=s=>s.replace(/&/g,'&amp;').replace(/</g,'&lt;');
+
+function faceSet(x,y,w,d,z0,h,hatch){
+  const t=[iso(x,y,z0+h),iso(x+w,y,z0+h),iso(x+w,y+d,z0+h),iso(x,y+d,z0+h)];
+  const r=[iso(x+w,y,z0+h),iso(x+w,y+d,z0+h),iso(x+w,y+d,z0),iso(x+w,y,z0)];
+  const l=[iso(x,y+d,z0+h),iso(x+w,y+d,z0+h),iso(x+w,y+d,z0),iso(x,y+d,z0)];
+  let s=poly(l,'f-l')+poly(r,'f-r')+poly(t,'f-top');
+  if(hatch){s+=poly(l,'h-l')+poly(r,'h-r');}
+  return s;
+}
+
+function nodeSvg(n){
+  const base=n.base||0;
+  let s=`<g class="node" data-id="${n.id}" tabindex="0" role="button" aria-label="${esc(n.name)}">`;
+  if(n.kind==='stack'){
+    const sh=.22,gap=.15;
+    for(let i=0;i<5;i++) s+=faceSet(n.x,n.y,n.w,n.d,base+i*(sh+gap),sh,true);
+    n._topz=base+5*(sh+gap);
+  }else{
+    s+=faceSet(n.x,n.y,n.w,n.d,base,n.h,n.kind!=='slab'&&n.kind!=='platform');
+    n._topz=base+n.h;
+  }
+  const co=n.chip?[n.x+n.chip[0],n.y+n.chip[1]]:[n.x+n.w/2,n.y+n.d/2];
+  const c=iso(co[0],co[1],n._topz);
+  s+=`<g class="chip"><rect x="${(c[0]-11).toFixed(1)}" y="${(c[1]-9).toFixed(1)}" width="22" height="18"/>`+
+     `<text x="${c[0].toFixed(1)}" y="${(c[1]+4).toFixed(1)}" text-anchor="middle">${n.code}</text></g></g>`;
+  return s;
+}
+
+function edgeSvg(e){
+  const scr=e.pts.map(p=>iso(p[0],p[1]));
+  const d='M'+scr.map(pt).join('L');
+  let s=`<g class="edge ${e.kind}" data-id="${e.id}"><path d="${d}" marker-end="url(#arr${e.kind==='fb'?'F':'M'})"/>`;
+  for(let i=1;i<scr.length-1;i++){
+    const[cx,cy]=scr[i];
+    s+=`<polygon class="joint" points="${cx},${cy-3.4} ${cx+3.4},${cy} ${cx},${cy+3.4} ${cx-3.4},${cy}"/>`;
+  }
+  s+='</g>';
+  if(e.label){
+    const l=iso(e.lab[0],e.lab[1]);
+    s+=`<g><text class="elabel" x="${l[0].toFixed(1)}" y="${l[1].toFixed(1)}" text-anchor="middle">${esc(e.label)}</text></g>`;
+  }
+  // precompute polyline for pulses
+  e._scr=scr;e._cum=[0];
+  for(let i=1;i<scr.length;i++){
+    e._cum.push(e._cum[i-1]+Math.hypot(scr[i][0]-scr[i-1][0],scr[i][1]-scr[i-1][1]));
+  }
+  e._len=e._cum[e._cum.length-1];
+  return s;
+}
+
+function edgePoint(e,dist){
+  const c=e._cum;
+  for(let i=1;i<c.length;i++){
+    if(dist<=c[i]){
+      const f=(dist-c[i-1])/((c[i]-c[i-1])||1);
+      return [e._scr[i-1][0]+(e._scr[i][0]-e._scr[i-1][0])*f, e._scr[i-1][1]+(e._scr[i][1]-e._scr[i-1][1])*f];
+    }
+  }
+  return e._scr[e._scr.length-1];
+}
+
+function buildMap(){
+  let defs=`<defs>
+    <pattern id="hL" width="5.5" height="5.5" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+      <line x1="0" y1="0" x2="0" y2="5.5" stroke="rgba(39,37,26,.42)" stroke-width=".8"/></pattern>
+    <pattern id="hR" width="5.5" height="5.5" patternUnits="userSpaceOnUse" patternTransform="rotate(-45)">
+      <line x1="0" y1="0" x2="0" y2="5.5" stroke="rgba(39,37,26,.30)" stroke-width=".8"/></pattern>
+    <marker id="arrM" viewBox="0 0 8 8" refX="6.5" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0.6 L7,4 L0,7.4 Z" fill="var(--ink)"/></marker>
+    <marker id="arrF" viewBox="0 0 8 8" refX="6.5" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0.6 L7,4 L0,7.4 Z" fill="var(--ink-soft)"/></marker>
+  </defs>`;
+
+  let grid='<g aria-hidden="true">';
+  for(let gx=-2;gx<=20;gx+=2){const a=iso(gx,-2),b=iso(gx,17);grid+=`<line class="gridline" x1="${a[0]}" y1="${a[1]}" x2="${b[0]}" y2="${b[1]}"/>`;}
+  for(let gy=-2;gy<=16;gy+=2){const a=iso(-2,gy),b=iso(20,gy);grid+=`<line class="gridline" x1="${a[0]}" y1="${a[1]}" x2="${b[0]}" y2="${b[1]}"/>`;}
+  grid+='</g>';
+
+  let regions='<g aria-hidden="true">';
+  for(const r of REGIONS){
+    regions+=`<polygon class="region" points="${r.pts.map(p=>pt(iso(p[0],p[1]))).join(' ')}"/>`;
+    const l=iso(r.lab[0],r.lab[1]);
+    regions+=`<text class="glabel" x="${l[0]}" y="${l[1]}">${esc(r.label)}</text>`;
+  }
+  for(const g of GLABELS){
+    const l=iso(g.pos[0],g.pos[1]);
+    regions+=`<text class="glabel" x="${l[0]}" y="${l[1]}">${g.t}</text>`;
+  }
+  regions+='</g>';
+
+  const edges='<g id="edges">'+EDGES.map(edgeSvg).join('')+'</g>';
+
+  const sorted=[...NODES].sort((a,b)=>{
+    const la=a.kind==='platform'?-1:0, lb=b.kind==='platform'?-1:0;
+    if(la!==lb)return la-lb;
+    return (a.x+a.y+a.w+a.d)-(b.x+b.y+b.w+b.d);
+  });
+  const blocks='<g id="blocks">'+sorted.map(nodeSvg).join('')+'</g>';
+
+  return defs+`<g id="world">`+grid+regions+edges+`<g id="pulses" aria-hidden="true"></g>`+blocks+`</g>`;
+}
+
+/* ───────────────────────── app state & wiring ───────────────────────── */
+
+const svg=document.getElementById('map');
+svg.innerHTML=buildMap();
+const world=document.getElementById('world');
+const tip=document.getElementById('tip');
+const pbody=document.getElementById('pbody');
+const nodeEls={},edgeEls={};
+svg.querySelectorAll('.node').forEach(el=>nodeEls[el.dataset.id]=el);
+svg.querySelectorAll('.edge').forEach(el=>edgeEls[el.dataset.id]=el);
+const nodeById=Object.fromEntries(NODES.map(n=>[n.id,n]));
+
+let view={x:0,y:0,k:1},home={x:0,y:0,k:1};
+let selId=null,tab='what',traceIdx=-1;
+let flowOn=!matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+function applyView(){world.setAttribute('transform',`translate(${view.x},${view.y}) scale(${view.k})`);}
+
+function fitView(){
+  let mnx=1e9,mny=1e9,mxx=-1e9,mxy=-1e9;
+  const consider=p=>{mnx=Math.min(mnx,p[0]);mxx=Math.max(mxx,p[0]);mny=Math.min(mny,p[1]);mxy=Math.max(mxy,p[1]);};
+  for(const n of NODES){consider(iso(n.x,n.y+n.d,0));consider(iso(n.x+n.w,n.y,0));consider(iso(n.x,n.y,(n._topz||n.h||1)));consider(iso(n.x+n.w,n.y+n.d,0));}
+  for(const e of EDGES)e._scr.forEach(consider);
+  mnx-=70;mny-=60;mxx+=70;mxy+=60;
+  const r=svg.getBoundingClientRect();
+  const k=Math.min(r.width/(mxx-mnx),r.height/(mxy-mny));
+  view={k,x:-mnx*k+(r.width-(mxx-mnx)*k)/2,y:-mny*k+(r.height-(mxy-mny)*k)/2};
+  home={...view};
+  applyView();
+}
+
+/* pan + zoom */
+let drag=null;
+svg.addEventListener('pointerdown',ev=>{
+  drag={sx:ev.clientX,sy:ev.clientY,vx:view.x,vy:view.y,moved:false};
+  svg.setPointerCapture(ev.pointerId);svg.classList.add('panning');
+});
+svg.addEventListener('pointermove',ev=>{
+  if(!drag)return;
+  const dx=ev.clientX-drag.sx,dy=ev.clientY-drag.sy;
+  if(Math.hypot(dx,dy)>4)drag.moved=true;
+  view.x=drag.vx+dx;view.y=drag.vy+dy;applyView();
+});
+svg.addEventListener('pointerup',ev=>{
+  svg.classList.remove('panning');
+  const moved=drag&&drag.moved;drag=null;
+  if(moved)return;
+  const g=ev.target.closest?ev.target.closest('.node'):null;
+  if(g)select(g.dataset.id);else if(selId){select(null);}
+});
+svg.addEventListener('wheel',ev=>{
+  ev.preventDefault();
+  const r=svg.getBoundingClientRect();
+  const mx=ev.clientX-r.left,my=ev.clientY-r.top;
+  const f=Math.exp(-ev.deltaY*0.0012);
+  const k2=Math.min(3.2,Math.max(.3,view.k*f)),real=k2/view.k;
+  view.x=mx-(mx-view.x)*real;view.y=my-(my-view.y)*real;view.k=k2;applyView();
+},{passive:false});
+function zoomBy(f){
+  const r=svg.getBoundingClientRect();
+  const mx=r.width/2,my=r.height/2;
+  const k2=Math.min(3.2,Math.max(.3,view.k*f)),real=k2/view.k;
+  view.x=mx-(mx-view.x)*real;view.y=my-(my-view.y)*real;view.k=k2;applyView();
+}
+document.getElementById('zin').onclick=()=>zoomBy(1.25);
+document.getElementById('zout').onclick=()=>zoomBy(.8);
+
+/* hover */
+for(const[id,el]of Object.entries(nodeEls)){
+  el.addEventListener('pointerenter',()=>{el.classList.add('hi');railRow(id)?.classList.add('sel');showTip(id);if(!selId&&traceIdx<0)renderNode(id,true);});
+  el.addEventListener('pointerleave',()=>{if(id!==selId){el.classList.remove('hi');railRow(id)?.classList.remove('sel');}hideTip();if(!selId&&traceIdx<0)renderPanel();});
+  el.addEventListener('pointermove',ev=>moveTip(ev));
+  el.addEventListener('keydown',ev=>{if(ev.key==='Enter'||ev.key===' '){ev.preventDefault();select(id);}});
+}
+function showTip(id){const n=nodeById[id];tip.innerHTML=`<b>${n.code} · ${esc(n.name)}</b>${esc(n.hover)}`;tip.style.display='block';}
+function hideTip(){tip.style.display='none';}
+function moveTip(ev){
+  const r=svg.getBoundingClientRect();
+  let x=ev.clientX-r.left+14,y=ev.clientY-r.top+14;
+  if(x>r.width-300)x-=320;if(y>r.height-110)y-=130;
+  tip.style.left=x+'px';tip.style.top=y+'px';
+}
+
+/* selection */
+function select(id){
+  if(traceIdx>=0)exitTrace();
+  if(selId&&nodeEls[selId]){nodeEls[selId].classList.remove('sel','hi');railRow(selId)?.classList.remove('sel');}
+  selId=(id===selId)?null:id;
+  if(selId){nodeEls[selId].classList.add('sel');railRow(selId)?.classList.add('sel');renderNode(selId,false);}
+  else renderPanel();
+}
+function railRow(id){return document.querySelector(`.row[data-id="${id}"]`);}
+
+/* sidebar */
+(function buildRail(){
+  const rail=document.getElementById('rail');
+  let h='';
+  for(const g of GROUPS){
+    h+=`<div class="grp">${g.label}</div>`;
+    for(const n of NODES.filter(n=>n.grp===g.id)){
+      h+=`<button class="row" data-id="${n.id}"><span class="cc">${n.code}</span><span class="nm">${esc(n.name)}</span><span class="md">${esc(n.model)}</span></button>`;
+    }
+  }
+  rail.innerHTML=h;
+  rail.querySelectorAll('.row').forEach(b=>{
+    const id=b.dataset.id;
+    b.addEventListener('mouseenter',()=>{nodeEls[id].classList.add('hi');if(!selId&&traceIdx<0)renderNode(id,true);});
+    b.addEventListener('mouseleave',()=>{if(id!==selId)nodeEls[id].classList.remove('hi');if(!selId&&traceIdx<0)renderPanel();});
+    b.addEventListener('click',()=>select(id));
+  });
+})();
+
+/* ───────────────────────── panel rendering ───────────────────────── */
+
+const OVERVIEW_WHAT=`
+<div class="eyebrow">claude-orchestrate</div>
+<h1>The Dispatch Floor</h1>
+<p class="sub">how one frontier model runs a floor of cheap, verified workers</p>
+<h2>What this is</h2>
+<p>This repository turns one expensive frontier model into a planner sitting on top of cheap parallel workers. The session model <mark>plans, routes, and verifies</mark>; haiku and sonnet do the volume. Every unit of work goes to the cheapest model that can reliably do it — and <mark>no sub-agent’s “done!” is ever trusted</mark>: a claim of success without gate evidence is a FAIL by definition.</p>
+<p>The diagram is a <mark>loop</mark> because a run is one: decompose → announce the routing table → preflight → dispatch waves → Gate 1 → Gate 2 → triage → integrate → Gate 3 → ship gate → back to you. The lower-left cluster is state on disk; the column on the far right is what ships in the plugin.</p>
+<p>Nearly every hard rule here was <mark>paid for by a field failure</mark>: the cold-cache rule by a lint count that swung 40–1800 and buried 2 real errors; the git-hygiene rule by a stash that swept another worker’s changes; the STATE-line token by a round-end report that read as “still running” and cost 43 idle minutes.</p>
+<h2>How to read it</h2>
+<p>Hover anything for a plain description; click to pin it. <mark>Height is model cost</mark> — the tallest block is the frontier model, the flat slabs are bash, git, and files, and they are load-bearing. <mark>Dashed lines are feedback</mark>: failure, escalation, recovery. <b>Trace one step</b> walks the loop in order.</p>
+<h2>The four ideas that carry it</h2>
+<table>
+<tr><td>triage first</td><td>most failures are bad specs or bad environments — escalation is the last resort, one step, ≤3 dispatches per unit</td></tr>
+<tr><td>evidence-gated</td><td>every PASS travels with a reference to its evidence; “looks correct” is a FAIL</td></tr>
+<tr><td>token conservation</td><td>the orchestrator never reads files — frontier tokens buy judgment, not I/O</td></tr>
+<tr><td>disk before memory</td><td>run state is a checkpoint file, not a recollection; recovery reads disk first</td></tr>
+</table>`;
+
+const OVERVIEW_HOW=`
+<div class="eyebrow">claude-orchestrate</div>
+<h1>How it’s built</h1>
+<p class="sub">a plugin of prompts and manifests — no runtime, no server, no secrets</p>
+<h2>In the repo</h2>
+<table>
+<tr><td><code>skills/orchestrate/SKILL.md</code></td><td>the full protocol — loads into your session model</td></tr>
+<tr><td><code>agents/foreman.md</code></td><td>opus @ high · the dispatch loop</td></tr>
+<tr><td><code>agents/verifier-fast.md</code></td><td>haiku · Gate 2, criteria comparison</td></tr>
+<tr><td><code>agents/verifier-deep.md</code></td><td>sonnet @ xhigh · Gate 2 + MISSING defects</td></tr>
+<tr><td><code>hooks/ + scripts/</code></td><td>SessionStart update notifier — read-only, never installs</td></tr>
+<tr><td><code>portable/orchestrator.md</code></td><td>the same protocol for Codex, Cursor, Gemini CLI, Copilot, Aider</td></tr>
+<tr><td><code>.claude-plugin/</code></td><td>plugin + marketplace manifests · v0.5.4 · MIT</td></tr>
+</table>
+<h2>Appears in your repo at runtime</h2>
+<table>
+<tr><td><code>.claude/orchestrate-runs/</code></td><td>per-run archive: checkpoint.json, dispatch/, reports/, gates/, failures/</td></tr>
+<tr><td><code>.claude/escalation-ledger.md</code></td><td>every escalated unit — the routing table’s feedback loop</td></tr>
+</table>
+<h2>The hard numbers</h2>
+<table>
+<tr><td>3 / unit</td><td>dispatch budget: original + one same-tier retry + one escalation</td></tr>
+<tr><td>3× units</td><td>global cap counting every dispatch — workers, verifiers, retries</td></tr>
+<tr><td>5 / 6</td><td>driver boundary: ≤5 units dispatch direct, 6+ get a foreman</td></tr>
+<tr><td>2–3</td><td>ceiling on concurrent shared-tree writers, disjoint scopes</td></tr>
+<tr><td>~20 + ~5 min</td><td>watchdog signals: stale checkpoint AND no file writes</td></tr>
+<tr><td>1 / window</td><td>restart intensity — a second stall in one phase ends resuming</td></tr>
+<tr><td>1 round</td><td>ship-gate fix rounds; anything still failing is surfaced, not looped</td></tr>
+</table>
+<h2>Install</h2>
+<p><code>/plugin marketplace add midego1/claude-orchestrate</code><br>
+<code>/plugin install orchestrate@claude-orchestrate</code></p>
+<p>Then start a new session and try <code>/orchestrate &lt;a substantive task&gt;</code>. Recommended session model: Fable 5 at xhigh effort — the orchestrator’s whole job is judgment.</p>`;
+
+function renderPanel(){
+  document.getElementById('tabWhat').classList.toggle('on',tab==='what');
+  document.getElementById('tabHow').classList.toggle('on',tab==='how');
+  pbody.innerHTML=tab==='what'?OVERVIEW_WHAT:OVERVIEW_HOW;
+  pbody.scrollTop=0;
+}
+
+function renderNode(id,preview){
+  const n=nodeById[id];
+  let h='';
+  if(!preview)h+=`<button class="backlink" id="backBtn">← back to overview</button>`;
+  h+=`<div class="nodehead"><span class="cc">${n.code}</span><div><h1 style="font-size:18px">${esc(n.name)}</h1><p class="sub">${esc(n.hover)}</p></div></div>`;
+  h+='<h2>Spec</h2><table>'+n.meta.map(m=>`<tr><td>${esc(m[0])}</td><td>${esc(m[1])}</td></tr>`).join('')+'</table>';
+  h+='<h2>What it does</h2>'+n.body.map(p=>`<p>${esc(p)}</p>`).join('');
+  pbody.innerHTML=h;
+  if(!preview)document.getElementById('backBtn').onclick=()=>select(null);
+  pbody.scrollTop=0;
+}
+
+document.getElementById('tabWhat').onclick=()=>{tab='what';if(selId)select(null);else if(traceIdx>=0)exitTrace();renderPanel();};
+document.getElementById('tabHow').onclick=()=>{tab='how';if(selId)select(null);else if(traceIdx>=0)exitTrace();renderPanel();};
+
+/* ───────────────────────── trace mode ───────────────────────── */
+
+function applyTrace(){
+  const st=STEPS[traceIdx];
+  const nset=new Set(st.n),eset=new Set(st.e);
+  for(const[id,el]of Object.entries(nodeEls))el.classList.toggle('dimmed',!nset.has(id)),el.classList.toggle('hi',nset.has(id));
+  for(const[id,el]of Object.entries(edgeEls))el.classList.toggle('dimmed',!eset.has(id)),el.classList.toggle('hi',eset.has(id));
+  let h=`<div class="stepct">Trace · step ${traceIdx+1} / ${STEPS.length}</div><h1 style="font-size:18px">${esc(st.t)}</h1>`;
+  h+=`<p style="margin-top:10px">${esc(st.x)}</p>`;
+  h+=`<div class="stepnav">
+        <button id="stPrev" ${traceIdx===0?'disabled':''}>← prev</button>
+        <button id="stNext">${traceIdx===STEPS.length-1?'finish':'next →'}</button>
+        <button id="stExit">exit</button>
+      </div>
+      <p class="sub" style="margin-top:12px">←/→ keys work too</p>`;
+  pbody.innerHTML=h;
+  document.getElementById('stPrev').onclick=()=>{if(traceIdx>0){traceIdx--;applyTrace();}};
+  document.getElementById('stNext').onclick=()=>{traceIdx<STEPS.length-1?(traceIdx++,applyTrace()):exitTrace();};
+  document.getElementById('stExit').onclick=exitTrace;
+}
+function enterTrace(){
+  if(selId)select(null);
+  traceIdx=0;
+  document.getElementById('btnTrace').classList.add('armed');
+  applyTrace();
+}
+function exitTrace(){
+  traceIdx=-1;
+  document.getElementById('btnTrace').classList.remove('armed');
+  for(const el of Object.values(nodeEls))el.classList.remove('dimmed','hi');
+  for(const el of Object.values(edgeEls))el.classList.remove('dimmed','hi');
+  renderPanel();
+}
+document.getElementById('btnTrace').onclick=()=>traceIdx<0?enterTrace():exitTrace();
+document.addEventListener('keydown',ev=>{
+  if(ev.key==='Escape'){if(traceIdx>=0)exitTrace();else if(selId)select(null);}
+  if(traceIdx>=0){
+    if(ev.key==='ArrowRight'){ev.preventDefault();traceIdx<STEPS.length-1?(traceIdx++,applyTrace()):exitTrace();}
+    if(ev.key==='ArrowLeft'&&traceIdx>0){ev.preventDefault();traceIdx--;applyTrace();}
+  }
+});
+
+/* ───────────────────────── flow pulses ───────────────────────── */
+
+const pulseG=document.getElementById('pulses');
+const pulseDots=[];
+for(const e of EDGES){
+  if(e.kind!=='main')continue;
+  const nd=Math.max(1,Math.floor(e._len/170));
+  for(let i=0;i<nd;i++){
+    const c=document.createElementNS('http://www.w3.org/2000/svg','circle');
+    c.setAttribute('r','2.6');c.setAttribute('class','pulse');
+    pulseG.appendChild(c);
+    pulseDots.push({e,off:i*(e._len/nd)+(e._len*.37)%60});
+  }
+}
+function setFlowBtn(){document.getElementById('btnFlow').textContent=flowOn?'▶ Pause the flow':'▶ Resume the flow';}
+document.getElementById('btnFlow').onclick=()=>{flowOn=!flowOn;pulseG.style.display=flowOn?'':'none';setFlowBtn();};
+setFlowBtn();if(!flowOn)pulseG.style.display='none';
+let last=0;
+function tick(now){
+  requestAnimationFrame(tick);
+  if(!flowOn)return;
+  const t=now/1000*44;
+  let i=0;
+  for(const c of pulseG.children){
+    const p=pulseDots[i++];
+    const q=edgePoint(p.e,(t+p.off)%p.e._len);
+    c.setAttribute('cx',q[0].toFixed(1));c.setAttribute('cy',q[1].toFixed(1));
+  }
+}
+requestAnimationFrame(tick);
+
+/* ───────────────────────── boot ───────────────────────── */
+
+document.getElementById('btnReset').onclick=()=>{
+  if(traceIdx>=0)exitTrace();
+  if(selId)select(null);
+  fitView();
+};
+addEventListener('resize',()=>{ /* keep user view; refit only if never interacted? simple: refit if at home */ });
+fitView();
+renderPanel();
+</script>
