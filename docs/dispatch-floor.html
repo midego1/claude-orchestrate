@@ -181,11 +181,11 @@
     <nav id="rail" aria-label="Component index"></nav>
 
     <div id="stage">
-      <svg id="map" role="img" aria-label="Isometric map of the claude-orchestrate protocol: an orchestrator decomposes a task into a routing plan, a foreman dispatches tiered workers in isolated worktrees, three verification gates and a ship gate check everything with evidence, and run state lives on disk in a checkpoint and archive."></svg>
+      <svg id="map" role="img" aria-label="Orbitable 3D map of the claude-orchestrate protocol: an orchestrator decomposes a task into a routing plan, a foreman dispatches tiered workers in isolated worktrees, three verification gates and a ship gate check everything with evidence, and run state lives on disk in a checkpoint and archive."></svg>
       <div id="zoomer"><button id="zin" aria-label="Zoom in">+</button><button id="zout" aria-label="Zoom out">−</button></div>
       <div id="tip"></div>
       <div id="hints">
-        <span>hover to read</span><span>click to pin</span><span>drag to pan</span><span>scroll to zoom</span><span>height = model cost · dashed = feedback</span>
+        <span>drag to orbit</span><span>shift-drag / right-drag to pan</span><span>scroll to zoom</span><span>hover to read · click to pin</span><span>height = model cost · dashed = feedback</span>
       </div>
     </div>
 
@@ -407,62 +407,127 @@ const STEPS=[
   x:'The orchestrator checks cross-unit consistency — every PASS line carrying an evidence reference — then a ship gate reviews the integrated diff for code and security issues. Findings get one fix round, one re-review. Then: what shipped, what’s parked, and why.'}
 ];
 
-/* ───────────────────────── iso rendering ───────────────────────── */
+/* ───────────────────── 3D projection & scene build ───────────────────── */
 
-const TW=44,TH=22,ZH=26;
-const iso=(x,y,z=0)=>[(x-y)*TW,(x+y)*TH-z*ZH];
+const S=62.23, ZC=30;                       // grid-unit and height-unit scale (px)
+const HOME_TH=Math.PI/4, HOME_EL=Math.PI/6; // default camera = the drafting-board view
+const PIVOT=[8.7,7,.6];                     // orbit centre — middle of the floor
+const cam={th:HOME_TH, el:HOME_EL};
+let Cth,Sth,Cel,Sel;
+function camSync(){Cth=Math.cos(cam.th);Sth=Math.sin(cam.th);Cel=Math.cos(cam.el);Sel=Math.sin(cam.el);}
+camSync();
+// orthographic: spin about vertical (th), tilt down by elevation (el)
+const P=(x,y,z=0)=>{const x1=x*Cth-y*Sth,y1=x*Sth+y*Cth;return[x1*S,y1*S*Sel-z*ZC*Cel];};
+const D=(x,y,z=0)=>(x*Sth+y*Cth)*S*Cel+z*ZC*Sel; // view-depth: larger = nearer
 const pt=p=>p[0].toFixed(1)+','+p[1].toFixed(1);
-const poly=(pts,cls)=>`<polygon class="${cls}" points="${pts.map(pt).join(' ')}"/>`;
 const esc=s=>s.replace(/&/g,'&amp;').replace(/</g,'&lt;');
+const NS='http://www.w3.org/2000/svg';
+const mk=(tag,attrs,parent)=>{const el=document.createElementNS(NS,tag);for(const k in attrs)el.setAttribute(k,attrs[k]);if(parent)parent.appendChild(el);return el;};
 
-function faceSet(x,y,w,d,z0,h,hatch){
-  const t=[iso(x,y,z0+h),iso(x+w,y,z0+h),iso(x+w,y+d,z0+h),iso(x,y+d,z0+h)];
-  const r=[iso(x+w,y,z0+h),iso(x+w,y+d,z0+h),iso(x+w,y+d,z0),iso(x+w,y,z0)];
-  const l=[iso(x,y+d,z0+h),iso(x+w,y+d,z0+h),iso(x+w,y+d,z0),iso(x,y+d,z0)];
-  let s=poly(l,'f-l')+poly(r,'f-r')+poly(t,'f-top');
-  if(hatch){s+=poly(l,'h-l')+poly(r,'h-r');}
-  return s;
+const svg=document.getElementById('map');
+svg.innerHTML=`<defs>
+    <pattern id="hL" width="5.5" height="5.5" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+      <line x1="0" y1="0" x2="0" y2="5.5" stroke="rgba(39,37,26,.42)" stroke-width=".8"/></pattern>
+    <pattern id="hR" width="5.5" height="5.5" patternUnits="userSpaceOnUse" patternTransform="rotate(-45)">
+      <line x1="0" y1="0" x2="0" y2="5.5" stroke="rgba(39,37,26,.30)" stroke-width=".8"/></pattern>
+    <marker id="arrM" viewBox="0 0 8 8" refX="6.5" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0.6 L7,4 L0,7.4 Z" fill="var(--ink)"/></marker>
+    <marker id="arrF" viewBox="0 0 8 8" refX="6.5" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0.6 L7,4 L0,7.4 Z" fill="var(--ink-soft)"/></marker>
+  </defs>
+  <g id="world">
+    <g id="gridg" aria-hidden="true"></g>
+    <g id="regiong" aria-hidden="true"></g>
+    <g id="edgeg"></g>
+    <g id="pulses" aria-hidden="true"></g>
+    <g id="blockg"></g>
+  </g>`;
+const world=document.getElementById('world');
+const gridG=document.getElementById('gridg'),regionG=document.getElementById('regiong'),
+      edgeG=document.getElementById('edgeg'),blockG=document.getElementById('blockg');
+
+const gridLines=[];
+for(let gx=-2;gx<=20;gx+=2)gridLines.push({a:[gx,-2],b:[gx,17],el:mk('line',{class:'gridline'},gridG)});
+for(let gy=-2;gy<=16;gy+=2)gridLines.push({a:[-2,gy],b:[20,gy],el:mk('line',{class:'gridline'},gridG)});
+
+const regionEls=REGIONS.map(r=>{
+  const poly=mk('polygon',{class:'region'},regionG);
+  const txt=mk('text',{class:'glabel'},regionG);txt.textContent=r.label;
+  return{r,poly,txt};
+});
+const glabelEls=GLABELS.map(g=>{const el=mk('text',{class:'glabel'},regionG);el.textContent=g.t;return{g,el};});
+
+for(const e of EDGES){
+  e.g=mk('g',{class:'edge '+e.kind,'data-id':e.id},edgeG);
+  e.path=mk('path',{'marker-end':`url(#arr${e.kind==='fb'?'F':'M'})`},e.g);
+  e.joints=e.pts.slice(1,-1).map(()=>mk('polygon',{class:'joint'},e.g));
+  if(e.label){const lg=mk('g',{},edgeG);e.ltxt=mk('text',{class:'elabel','text-anchor':'middle'},lg);e.ltxt.textContent=e.label;}
 }
 
-function nodeSvg(n){
+for(const n of NODES){
+  n.g=mk('g',{class:'node','data-id':n.id,tabindex:'0',role:'button','aria-label':n.name},blockG);
+  n.cubs=[];
   const base=n.base||0;
-  let s=`<g class="node" data-id="${n.id}" tabindex="0" role="button" aria-label="${esc(n.name)}">`;
-  if(n.kind==='stack'){
-    const sh=.22,gap=.15;
-    for(let i=0;i<5;i++) s+=faceSet(n.x,n.y,n.w,n.d,base+i*(sh+gap),sh,true);
-    n._topz=base+5*(sh+gap);
-  }else{
-    s+=faceSet(n.x,n.y,n.w,n.d,base,n.h,n.kind!=='slab'&&n.kind!=='platform');
-    n._topz=base+n.h;
-  }
-  const co=n.chip?[n.x+n.chip[0],n.y+n.chip[1]]:[n.x+n.w/2,n.y+n.d/2];
-  const c=iso(co[0],co[1],n._topz);
-  s+=`<g class="chip"><rect x="${(c[0]-11).toFixed(1)}" y="${(c[1]-9).toFixed(1)}" width="22" height="18"/>`+
-     `<text x="${c[0].toFixed(1)}" y="${(c[1]+4).toFixed(1)}" text-anchor="middle">${n.code}</text></g></g>`;
-  return s;
+  const addCub=(z0,h,hatch)=>{
+    const c={z0,h};
+    c.fy=mk('polygon',{class:'f-l'},n.g);
+    c.fx=mk('polygon',{class:'f-r'},n.g);
+    c.ft=mk('polygon',{class:'f-top'},n.g);
+    if(hatch){c.hy=mk('polygon',{class:'h-l'},n.g);c.hx=mk('polygon',{class:'h-r'},n.g);}
+    n.cubs.push(c);
+  };
+  if(n.kind==='stack'){const sh=.22,gap=.15;for(let i=0;i<5;i++)addCub(base+i*(sh+gap),sh,true);n._topz=base+5*(sh+gap);}
+  else{addCub(base,n.h,n.kind!=='slab'&&n.kind!=='platform');n._topz=base+n.h;}
+  n._chip=n.chip?[n.x+n.chip[0],n.y+n.chip[1]]:[n.x+n.w/2,n.y+n.d/2];
+  const cg=mk('g',{class:'chip'},n.g);
+  n.chipRect=mk('rect',{width:22,height:18},cg);
+  n.chipTxt=mk('text',{'text-anchor':'middle'},cg);n.chipTxt.textContent=n.code;
 }
 
-function edgeSvg(e){
-  const scr=e.pts.map(p=>iso(p[0],p[1]));
-  const d='M'+scr.map(pt).join('L');
-  let s=`<g class="edge ${e.kind}" data-id="${e.id}"><path d="${d}" marker-end="url(#arr${e.kind==='fb'?'F':'M'})"/>`;
-  for(let i=1;i<scr.length-1;i++){
-    const[cx,cy]=scr[i];
-    s+=`<polygon class="joint" points="${cx},${cy-3.4} ${cx+3.4},${cy} ${cx},${cy+3.4} ${cx-3.4},${cy}"/>`;
+function redraw(){
+  camSync();
+  for(const l of gridLines){
+    const a=P(l.a[0],l.a[1]),b=P(l.b[0],l.b[1]);
+    l.el.setAttribute('x1',a[0].toFixed(1));l.el.setAttribute('y1',a[1].toFixed(1));
+    l.el.setAttribute('x2',b[0].toFixed(1));l.el.setAttribute('y2',b[1].toFixed(1));
   }
-  s+='</g>';
-  if(e.label){
-    const l=iso(e.lab[0],e.lab[1]);
-    s+=`<g><text class="elabel" x="${l[0].toFixed(1)}" y="${l[1].toFixed(1)}" text-anchor="middle">${esc(e.label)}</text></g>`;
+  for(const{r,poly,txt}of regionEls){
+    poly.setAttribute('points',r.pts.map(p=>pt(P(p[0],p[1]))).join(' '));
+    const l=P(r.lab[0],r.lab[1]);txt.setAttribute('x',l[0].toFixed(1));txt.setAttribute('y',l[1].toFixed(1));
   }
-  // precompute polyline for pulses
-  e._scr=scr;e._cum=[0];
-  for(let i=1;i<scr.length;i++){
-    e._cum.push(e._cum[i-1]+Math.hypot(scr[i][0]-scr[i-1][0],scr[i][1]-scr[i-1][1]));
+  for(const{g,el}of glabelEls){const l=P(g.pos[0],g.pos[1]);el.setAttribute('x',l[0].toFixed(1));el.setAttribute('y',l[1].toFixed(1));}
+  for(const e of EDGES){
+    const scr=e.pts.map(p=>P(p[0],p[1]));
+    e._scr=scr;e._cum=[0];
+    for(let i=1;i<scr.length;i++)e._cum.push(e._cum[i-1]+Math.hypot(scr[i][0]-scr[i-1][0],scr[i][1]-scr[i-1][1]));
+    e._len=e._cum[e._cum.length-1]||1;
+    e.path.setAttribute('d','M'+scr.map(pt).join('L'));
+    e.joints.forEach((j,i)=>{
+      const[cx,cy]=scr[i+1];
+      j.setAttribute('points',`${cx.toFixed(1)},${(cy-3.4).toFixed(1)} ${(cx+3.4).toFixed(1)},${cy.toFixed(1)} ${cx.toFixed(1)},${(cy+3.4).toFixed(1)} ${(cx-3.4).toFixed(1)},${cy.toFixed(1)}`);
+    });
+    if(e.ltxt){const l=P(e.lab[0],e.lab[1]);e.ltxt.setAttribute('x',l[0].toFixed(1));e.ltxt.setAttribute('y',l[1].toFixed(1));}
   }
-  e._len=e._cum[e._cum.length-1];
-  return s;
+  for(const n of NODES){
+    const{x,y,w,d}=n;
+    const xs=Sth>=0?x+w:x, ys=Cth>=0?y+d:y; // the two side faces facing the camera
+    for(const c of n.cubs){
+      const z0=c.z0,z1=c.z0+c.h;
+      const top=[P(x,y,z1),P(x+w,y,z1),P(x+w,y+d,z1),P(x,y+d,z1)].map(pt).join(' ');
+      const fx=[P(xs,y,z1),P(xs,y+d,z1),P(xs,y+d,z0),P(xs,y,z0)].map(pt).join(' ');
+      const fy=[P(x,ys,z1),P(x+w,ys,z1),P(x+w,ys,z0),P(x,ys,z0)].map(pt).join(' ');
+      c.ft.setAttribute('points',top);c.fx.setAttribute('points',fx);c.fy.setAttribute('points',fy);
+      if(c.hx){c.hx.setAttribute('points',fx);c.hy.setAttribute('points',fy);}
+    }
+    const cp=P(n._chip[0],n._chip[1],n._topz);
+    n.chipRect.setAttribute('x',(cp[0]-11).toFixed(1));n.chipRect.setAttribute('y',(cp[1]-9).toFixed(1));
+    n.chipTxt.setAttribute('x',cp[0].toFixed(1));n.chipTxt.setAttribute('y',(cp[1]+4).toFixed(1));
+    n._depth=(n.kind==='platform'?-1e6:0)+D(x+w/2,y+d/2,(n.base||0)+n._topz/2);
+  }
+  // painter's algorithm: re-append node groups back-to-front
+  [...NODES].sort((a,b)=>a._depth-b._depth).forEach(n=>blockG.appendChild(n.g));
 }
+redraw();
 
 function edgePoint(e,dist){
   const c=e._cum;
@@ -475,57 +540,13 @@ function edgePoint(e,dist){
   return e._scr[e._scr.length-1];
 }
 
-function buildMap(){
-  let defs=`<defs>
-    <pattern id="hL" width="5.5" height="5.5" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
-      <line x1="0" y1="0" x2="0" y2="5.5" stroke="rgba(39,37,26,.42)" stroke-width=".8"/></pattern>
-    <pattern id="hR" width="5.5" height="5.5" patternUnits="userSpaceOnUse" patternTransform="rotate(-45)">
-      <line x1="0" y1="0" x2="0" y2="5.5" stroke="rgba(39,37,26,.30)" stroke-width=".8"/></pattern>
-    <marker id="arrM" viewBox="0 0 8 8" refX="6.5" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-      <path d="M0,0.6 L7,4 L0,7.4 Z" fill="var(--ink)"/></marker>
-    <marker id="arrF" viewBox="0 0 8 8" refX="6.5" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-      <path d="M0,0.6 L7,4 L0,7.4 Z" fill="var(--ink-soft)"/></marker>
-  </defs>`;
-
-  let grid='<g aria-hidden="true">';
-  for(let gx=-2;gx<=20;gx+=2){const a=iso(gx,-2),b=iso(gx,17);grid+=`<line class="gridline" x1="${a[0]}" y1="${a[1]}" x2="${b[0]}" y2="${b[1]}"/>`;}
-  for(let gy=-2;gy<=16;gy+=2){const a=iso(-2,gy),b=iso(20,gy);grid+=`<line class="gridline" x1="${a[0]}" y1="${a[1]}" x2="${b[0]}" y2="${b[1]}"/>`;}
-  grid+='</g>';
-
-  let regions='<g aria-hidden="true">';
-  for(const r of REGIONS){
-    regions+=`<polygon class="region" points="${r.pts.map(p=>pt(iso(p[0],p[1]))).join(' ')}"/>`;
-    const l=iso(r.lab[0],r.lab[1]);
-    regions+=`<text class="glabel" x="${l[0]}" y="${l[1]}">${esc(r.label)}</text>`;
-  }
-  for(const g of GLABELS){
-    const l=iso(g.pos[0],g.pos[1]);
-    regions+=`<text class="glabel" x="${l[0]}" y="${l[1]}">${g.t}</text>`;
-  }
-  regions+='</g>';
-
-  const edges='<g id="edges">'+EDGES.map(edgeSvg).join('')+'</g>';
-
-  const sorted=[...NODES].sort((a,b)=>{
-    const la=a.kind==='platform'?-1:0, lb=b.kind==='platform'?-1:0;
-    if(la!==lb)return la-lb;
-    return (a.x+a.y+a.w+a.d)-(b.x+b.y+b.w+b.d);
-  });
-  const blocks='<g id="blocks">'+sorted.map(nodeSvg).join('')+'</g>';
-
-  return defs+`<g id="world">`+grid+regions+edges+`<g id="pulses" aria-hidden="true"></g>`+blocks+`</g>`;
-}
-
 /* ───────────────────────── app state & wiring ───────────────────────── */
 
-const svg=document.getElementById('map');
-svg.innerHTML=buildMap();
-const world=document.getElementById('world');
 const tip=document.getElementById('tip');
 const pbody=document.getElementById('pbody');
 const nodeEls={},edgeEls={};
-svg.querySelectorAll('.node').forEach(el=>nodeEls[el.dataset.id]=el);
-svg.querySelectorAll('.edge').forEach(el=>edgeEls[el.dataset.id]=el);
+NODES.forEach(n=>nodeEls[n.id]=n.g);
+EDGES.forEach(e=>edgeEls[e.id]=e.g);
 const nodeById=Object.fromEntries(NODES.map(n=>[n.id,n]));
 
 let view={x:0,y:0,k:1},home={x:0,y:0,k:1};
@@ -537,7 +558,7 @@ function applyView(){world.setAttribute('transform',`translate(${view.x},${view.
 function fitView(){
   let mnx=1e9,mny=1e9,mxx=-1e9,mxy=-1e9;
   const consider=p=>{mnx=Math.min(mnx,p[0]);mxx=Math.max(mxx,p[0]);mny=Math.min(mny,p[1]);mxy=Math.max(mxy,p[1]);};
-  for(const n of NODES){consider(iso(n.x,n.y+n.d,0));consider(iso(n.x+n.w,n.y,0));consider(iso(n.x,n.y,(n._topz||n.h||1)));consider(iso(n.x+n.w,n.y+n.d,0));}
+  for(const n of NODES)for(const cr of[[n.x,n.y],[n.x+n.w,n.y],[n.x,n.y+n.d],[n.x+n.w,n.y+n.d]]){consider(P(cr[0],cr[1],0));consider(P(cr[0],cr[1],n._topz));}
   for(const e of EDGES)e._scr.forEach(consider);
   mnx-=70;mny-=60;mxx+=70;mxy+=60;
   const r=svg.getBoundingClientRect();
@@ -547,25 +568,62 @@ function fitView(){
   applyView();
 }
 
-/* pan + zoom */
-let drag=null;
+/* orbit + pan + pinch + zoom */
+const pointers=new Map();
+let gest=null;
+svg.addEventListener('contextmenu',ev=>ev.preventDefault());
 svg.addEventListener('pointerdown',ev=>{
-  drag={sx:ev.clientX,sy:ev.clientY,vx:view.x,vy:view.y,moved:false};
-  svg.setPointerCapture(ev.pointerId);svg.classList.add('panning');
+  svg.setPointerCapture(ev.pointerId);
+  pointers.set(ev.pointerId,[ev.clientX,ev.clientY]);
+  if(pointers.size===2){
+    const[a,b]=[...pointers.values()];
+    gest={mode:'pinch',dist:Math.hypot(a[0]-b[0],a[1]-b[1]),mid:[(a[0]+b[0])/2,(a[1]+b[1])/2],moved:true};
+  }else{
+    const pan=ev.shiftKey||ev.button===1||ev.button===2;
+    gest={mode:pan?'pan':'orbit',sx:ev.clientX,sy:ev.clientY,vx:view.x,vy:view.y,th:cam.th,el:cam.el,moved:false};
+  }
+  svg.classList.add('panning');
 });
 svg.addEventListener('pointermove',ev=>{
-  if(!drag)return;
-  const dx=ev.clientX-drag.sx,dy=ev.clientY-drag.sy;
-  if(Math.hypot(dx,dy)>4)drag.moved=true;
-  view.x=drag.vx+dx;view.y=drag.vy+dy;applyView();
+  if(!gest||!pointers.has(ev.pointerId))return;
+  pointers.set(ev.pointerId,[ev.clientX,ev.clientY]);
+  if(gest.mode==='pinch'){
+    const vals=[...pointers.values()];if(vals.length<2)return;
+    const[a,b]=vals;
+    const dist=Math.hypot(a[0]-b[0],a[1]-b[1]),mid=[(a[0]+b[0])/2,(a[1]+b[1])/2];
+    const r=svg.getBoundingClientRect();
+    const f=dist/(gest.dist||1);
+    const k2=Math.min(3.2,Math.max(.3,view.k*f)),real=k2/view.k;
+    const mx=mid[0]-r.left,my=mid[1]-r.top;
+    view.x=mx-(mx-view.x)*real+(mid[0]-gest.mid[0]);
+    view.y=my-(my-view.y)*real+(mid[1]-gest.mid[1]);
+    view.k=k2;gest.dist=dist;gest.mid=mid;applyView();
+  }else{
+    const dx=ev.clientX-gest.sx,dy=ev.clientY-gest.sy;
+    if(Math.hypot(dx,dy)>4)gest.moved=true;
+    if(gest.mode==='pan'){view.x=gest.vx+dx;view.y=gest.vy+dy;applyView();}
+    else{
+      const b=P(PIVOT[0],PIVOT[1],PIVOT[2]);           // pivot on screen before the turn
+      cam.th=gest.th+dx*0.006;
+      cam.el=Math.min(1.35,Math.max(0.18,gest.el+dy*0.006));
+      camSync();
+      const a=P(PIVOT[0],PIVOT[1],PIVOT[2]);           // …and after — hold it fixed
+      view.x+=(b[0]-a[0])*view.k;view.y+=(b[1]-a[1])*view.k;
+      applyView();redraw();
+    }
+  }
 });
 svg.addEventListener('pointerup',ev=>{
-  svg.classList.remove('panning');
-  const moved=drag&&drag.moved;drag=null;
-  if(moved)return;
-  const g=ev.target.closest?ev.target.closest('.node'):null;
-  if(g)select(g.dataset.id);else if(selId){select(null);}
+  pointers.delete(ev.pointerId);
+  const wasClick=gest&&gest.mode!=='pinch'&&!gest.moved;
+  if(pointers.size===0){gest=null;svg.classList.remove('panning');}
+  else if(gest&&gest.mode==='pinch'){pointers.clear();gest=null;svg.classList.remove('panning');}
+  if(wasClick){
+    const g=ev.target.closest?ev.target.closest('.node'):null;
+    if(g)select(g.dataset.id);else if(selId)select(null);
+  }
 });
+svg.addEventListener('pointercancel',ev=>{pointers.delete(ev.pointerId);gest=null;svg.classList.remove('panning');});
 svg.addEventListener('wheel',ev=>{
   ev.preventDefault();
   const r=svg.getBoundingClientRect();
@@ -639,7 +697,7 @@ const OVERVIEW_WHAT=`
 <p>The diagram is a <mark>loop</mark> because a run is one: decompose → announce the routing table → preflight → dispatch waves → Gate 1 → Gate 2 → triage → integrate → Gate 3 → ship gate → back to you. The lower-left cluster is state on disk; the column on the far right is what ships in the plugin.</p>
 <p>Nearly every hard rule here was <mark>paid for by a field failure</mark>: the cold-cache rule by a lint count that swung 40–1800 and buried 2 real errors; the git-hygiene rule by a stash that swept another worker’s changes; the STATE-line token by a round-end report that read as “still running” and cost 43 idle minutes.</p>
 <h2>How to read it</h2>
-<p>Hover anything for a plain description; click to pin it. <mark>Height is model cost</mark> — the tallest block is the frontier model, the flat slabs are bash, git, and files, and they are load-bearing. <mark>Dashed lines are feedback</mark>: failure, escalation, recovery. <b>Trace one step</b> walks the loop in order.</p>
+<p><mark>Drag to orbit</mark> — the scene is fully 3D, so spin it around to untangle crossing lines and see the blocks from any side (shift-drag pans, scroll zooms). Hover anything for a plain description; click to pin it. <mark>Height is model cost</mark> — the tallest block is the frontier model, the flat slabs are bash, git, and files, and they are load-bearing. <mark>Dashed lines are feedback</mark>: failure, escalation, recovery. <b>Trace one step</b> walks the loop in order.</p>
 <h2>The four ideas that carry it</h2>
 <table>
 <tr><td>triage first</td><td>most failures are bad specs or bad environments — escalation is the last resort, one step, ≤3 dispatches per unit</td></tr>
@@ -782,6 +840,7 @@ requestAnimationFrame(tick);
 document.getElementById('btnReset').onclick=()=>{
   if(traceIdx>=0)exitTrace();
   if(selId)select(null);
+  cam.th=HOME_TH;cam.el=HOME_EL;redraw();
   fitView();
 };
 addEventListener('resize',()=>{ /* keep user view; refit only if never interacted? simple: refit if at home */ });
