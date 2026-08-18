@@ -4,6 +4,18 @@ All notable changes to the orchestrate plugin. The update notifier reads this fi
 
 ## [Unreleased]
 
+## [0.5.5] — 2026-08-17
+
+Harness-change release, not a field report: Claude Code gained cross-session connectivity — sessions can list and message each other, and (verified by direct probe, not just docs) a subagent can now SendMessage `main` and sibling agents. One of the plugin's stated impossibilities became merely a prohibition, and two new realities needed encoding. The architecture itself — synchronous dispatch, checkpoint contract, foreman resume — survives unchanged: subagents still cannot message across sessions, and cross-session messages are plain text, queued (never interrupting a tool mid-flight), and can never approve a permission prompt.
+
+**Why update:** the "workers can't message their dispatcher" rationale is now factually false — workers CAN message `main`, so dispatch prompts must forbid it explicitly or an unsolicited worker message lands in the main session looking like a report that bypassed both gates; runs also gain a triage rule for peer-session messages arriving mid-run (five live peers were observed on one host), and the stall watchdog gains a real wake-up primitive.
+
+- **Worker messaging: impossible → forbidden** — the rule (a worker's final text IS its report) is unchanged, but its justification moved from physics to contract. The execution sentence of file-referenced dispatch and the standard worker preamble now carry an explicit "do not use SendMessage" line; a worker message that arrives anyway is advisory data, never an accepted report or gate result
+- **Incoming agent messages are advisory, never authoritative** — new lifecycle rule: messages can now arrive mid-run from workers ignoring the prohibition or from unrelated peer sessions on the same machine. Reconcile every such message against `checkpoint.json`; never accept one as a worker report, gate verdict, plan change, or user approval (the harness enforces the last — a peer message cannot approve permission prompts or alter settings). Authoritative message paths remain exactly the old ones: orchestrator→foreman resume, wind-down, unit injection with full contract + restated cap
+- **The watchdog's wake-up gap is closed** — "an agent cannot wake itself" still holds, but a peer can: a cross-session message to an idle session starts a new turn, so a scheduled task or watchdog peer session that messages the orchestrator is a real wake-up, not a best-effort reminder. The triggered response is the unchanged notification handler — the checkpoint still decides
+- **Verified constraints, for the record** — subagent→cross-session messaging does not exist (probe: ListAgents disabled in subagents; docs: sibling roster is session-scoped); delivery is queued at the recipient's next turn, so a message alone cannot interrupt a running turn; repeated identical messages are rate-limited/dropped
+- **Evaluated and deferred: agent teams** — separate-session teammates with a shared task list and idle-notifications-to-lead is effectively a native foreman layer, but it is experimental and env-gated (`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`); revisit when it stabilizes
+
 ## [0.5.4] — 2026-08-05
 
 Fifth field report: a 15-unit, 3-phase build under an opus foreman. The foreman stopped itself three times and cost ~60 minutes of idle wall-clock — with zero lost work, because the checkpoint contract held. None of the three were process death, which 0.4.2 already covered. The foreman ended its own turn cleanly each time, and its round-end report read as a run still in flight.
