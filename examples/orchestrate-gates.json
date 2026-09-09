@@ -1,0 +1,38 @@
+{
+  "$schema": "https://raw.githubusercontent.com/midego1/claude-orchestrate/main/schemas/gates-manifest.schema.json",
+  "$comment": "Copy this file to <repo>/.claude/orchestrate-gates.json (or <repo>/orchestrate-gates.json) and replace the pnpm commands with the repository's own. Every '$comment' key is ignored by the CLI. Commands run with 'bash -c' in the gate cwd; a non-zero exit is a FAIL.",
+
+  "install": "pnpm install --frozen-lockfile",
+  "envBootstrap": "cp -n .env.example .env 2>/dev/null || true",
+
+  "$comment_cachePaths": "Deleted before a cold run (the ship gate, or gate run --cold). Patterns never reach into node_modules or .git: a hit under either path component is skipped, so '**/dist' clears package build output but leaves node_modules/<pkg>/dist alone.",
+  "cachePaths": [".turbo", "**/dist", ".cache", "**/*tsbuildinfo*"],
+
+  "sharedCache": {
+    "note": "Workers share the pnpm content-addressable store (pnpm store path), so 'install' in a fresh worktree links instead of downloading. Point PNPM_HOME/pnpm store at one location for every worktree."
+  },
+
+  "gates": {
+    "unit": [
+      { "$comment": "Warm gates, run by the worker and re-run by the dispatcher at Gate 1 inside the unit worktree.", "id": "typecheck", "cmd": "pnpm typecheck" },
+      { "$comment": "{{baseline}} becomes the --since sha (or the checkpoint baselineSha): only packages changed since the baseline are tested.", "id": "test", "cmd": "pnpm test --filter ...[{{baseline}}]" }
+    ],
+    "integration": [
+      { "$comment": "Warm, after each merge into the integration branch.", "id": "typecheck", "cmd": "pnpm typecheck" },
+      { "id": "test", "cmd": "pnpm test" }
+    ],
+    "ship": [
+      { "$comment": "The ship stage always runs cold: cachePaths are deleted first.", "id": "build", "cmd": "pnpm build" },
+      { "id": "lint", "cmd": "pnpm lint" },
+      { "id": "test", "cmd": "pnpm test" },
+      { "$comment": "optional: reported as FAIL when it fails, but the stage still passes.", "id": "e2e", "cmd": "pnpm e2e", "optional": true }
+    ]
+  },
+
+  "pricing": {
+    "$comment": "USD per million tokens, e.g. \"sonnet\": { \"inPerMTok\": 3, \"outPerMTok\": 15, \"perMTok\": 6 }. Fill in the current list prices; until then the empty objects make 'orchestrate cost' print 'USD n/a' (a rate of 0 is treated the same way, never as free). perMTok is a blended rate for dispatches that recorded only a tokens total.",
+    "haiku":  {},
+    "sonnet": {},
+    "opus":   {}
+  }
+}

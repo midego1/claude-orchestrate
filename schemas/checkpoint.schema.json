@@ -1,0 +1,110 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/midego1/claude-orchestrate/schemas/checkpoint.schema.json",
+  "title": "orchestrate run checkpoint (schemaVersion 2)",
+  "description": "Machine-readable run state written by bin/orchestrate. Every v0.5.x field keeps its name; schemaVersion, dispatchMode, harness, dispatchTally.capSource, openWorktrees[].baselineSha and the per-unit plan/dispatch fields are additive.",
+  "type": "object",
+  "required": [
+    "schemaVersion", "runId", "integrationRoot", "integrationBranch", "baselineSha", "lastIntegratedSha",
+    "dispatchMode", "harness", "dispatchTally", "owner", "stallCount", "lastStallAt", "openWorktrees", "units", "nextAction"
+  ],
+  "properties": {
+    "schemaVersion": { "type": "integer", "const": 2 },
+    "runId": { "type": "string", "minLength": 1 },
+    "integrationRoot": { "type": "string", "minLength": 1 },
+    "integrationBranch": { "type": "string" },
+    "baselineSha": { "type": "string" },
+    "lastIntegratedSha": { "type": "string" },
+    "dispatchMode": { "type": "string", "enum": ["FOREMAN", "DIRECT"] },
+    "harness": {
+      "type": "object",
+      "required": ["claudeCodeVersion", "dispatch", "backgroundTasksDisabled", "forkModeDisabled", "spawnDepth", "subagentModelForce", "foremanAllowed", "checkedAt"],
+      "properties": {
+        "claudeCodeVersion": { "type": "string" },
+        "dispatch": { "type": "string", "enum": ["foreground", "background", "foreground-on-request", "unknown"] },
+        "backgroundTasksDisabled": { "type": "boolean" },
+        "forkModeDisabled": { "type": "boolean" },
+        "spawnDepth": { "type": "integer", "minimum": 0 },
+        "subagentModelForce": { "type": "boolean" },
+        "foremanAllowed": { "type": "boolean" },
+        "checkedAt": { "type": "string" }
+      }
+    },
+    "dispatchTally": {
+      "type": "object",
+      "required": ["used", "cap"],
+      "properties": {
+        "used": { "type": "integer", "minimum": 0 },
+        "cap": { "type": "integer", "minimum": 0 },
+        "capSource": { "type": "string", "enum": ["planned-slots", "manual"] }
+      }
+    },
+    "owner": {
+      "type": "object",
+      "required": ["agentId", "epoch"],
+      "properties": {
+        "agentId": { "type": "string" },
+        "epoch": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "stallCount": { "type": "integer", "minimum": 0 },
+    "lastStallAt": { "type": "string" },
+    "openWorktrees": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "branch", "unit"],
+        "properties": {
+          "path": { "type": "string", "minLength": 1 },
+          "branch": { "type": "string" },
+          "unit": { "type": "string", "minLength": 1 },
+          "baselineSha": { "type": "string" }
+        }
+      }
+    },
+    "units": {
+      "type": "array",
+      "description": "Planned units in plan order, followed by the reserved pseudo-unit 'ship' (seeded by init: tier T2, model opus, effort xhigh, verifier none, isolation shared) that carries the ship-gate dispatches (roles review, security, fix, reverify); 'ship' is outside the planned-slot sum (the cap's +4 covers it), never selected by resume, and needs no sha/evidenceRef when integrated.",
+      "items": {
+        "type": "object",
+        "required": ["id", "status"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "status": { "type": "string", "enum": ["pending", "in-flight", "integrated", "failed", "surfaced"] },
+          "tier": { "type": "string", "enum": ["T0", "T1", "T2", "T3"] },
+          "model": { "type": "string" },
+          "effort": { "type": "string" },
+          "verifier": { "type": "string", "enum": ["none", "fast", "deep"] },
+          "isolation": { "type": "string", "enum": ["worktree", "shared"] },
+          "dependsOn": { "type": "array", "items": { "type": "string" } },
+          "sha": { "type": "string" },
+          "evidenceRef": { "type": "string" },
+          "spotCheck": { "type": "string" },
+          "dispatches": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["n", "role", "openedAt", "result"],
+              "properties": {
+                "n": { "type": "integer", "minimum": 1 },
+                "role": { "type": "string", "enum": ["worker", "verifier", "fix", "reverify", "review", "security"] },
+                "model": { "type": "string" },
+                "effort": { "type": "string" },
+                "epoch": { "type": "integer", "minimum": 1 },
+                "openedAt": { "type": "string" },
+                "closedAt": { "type": "string" },
+                "durationSec": { "type": "integer", "minimum": 0 },
+                "tokens": { "type": "integer", "minimum": 0 },
+                "tokensIn": { "type": "integer", "minimum": 0 },
+                "tokensOut": { "type": "integer", "minimum": 0 },
+                "result": { "type": "string", "enum": ["PASS", "FAIL", "open"] },
+                "evidenceRef": { "type": "string" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "nextAction": { "type": "string", "minLength": 1 }
+  }
+}

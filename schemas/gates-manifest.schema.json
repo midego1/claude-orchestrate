@@ -1,0 +1,113 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/midego1/claude-orchestrate/schemas/gates-manifest.schema.json",
+  "title": "orchestrate gates manifest",
+  "description": "Per-repository gate manifest read by 'orchestrate gate run' and 'orchestrate worktree add'. Lives at .claude/orchestrate-gates.json (fallback: orchestrate-gates.json at the repo root). JSON, not YAML: the CLI is shell plus the python3 standard library. '$comment' keys are allowed anywhere.",
+  "type": "object",
+  "required": [
+    "gates"
+  ],
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "$comment": {
+      "type": "string"
+    },
+    "install": {
+      "type": "string",
+      "description": "Dependency install command run inside every new worktree."
+    },
+    "envBootstrap": {
+      "type": "string",
+      "description": "Command that seeds env files inside a fresh worktree; runs before install."
+    },
+    "cachePaths": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Glob patterns (relative to the gate cwd) deleted before a cold run. '**' recurses. Anything under a node_modules or .git path component is never deleted, whatever the pattern matches."
+    },
+    "sharedCache": {
+      "type": "object",
+      "properties": {
+        "note": {
+          "type": "string"
+        }
+      },
+      "description": "Free text: how workers share the dependency store."
+    },
+    "gates": {
+      "type": "object",
+      "description": "Per-stage command lists. A missing 'integration' stage falls back to the 'unit' list and a missing 'ship' stage to 'integration' then 'unit' ('orchestrate gate run' says so on stderr); 'gate run --cmd <id>=<command>' overrides the manifest for one run.",
+      "properties": {
+        "unit": {
+          "$ref": "#/$defs/stage"
+        },
+        "integration": {
+          "$ref": "#/$defs/stage"
+        },
+        "ship": {
+          "$ref": "#/$defs/stage"
+        }
+      }
+    },
+    "pricing": {
+      "type": "object",
+      "description": "Per model alias. inPerMTok/outPerMTok apply when a dispatch records tokensIn/tokensOut; perMTok is a blended rate applied to the plain tokens total. Without a usable rate, 'orchestrate cost' prints no USD.",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "inPerMTok": {
+            "type": "number",
+            "minimum": 0
+          },
+          "outPerMTok": {
+            "type": "number",
+            "minimum": 0
+          },
+          "perMTok": {
+            "type": "number",
+            "minimum": 0
+          }
+        }
+      },
+      "properties": {
+        "$comment": {
+          "type": "string"
+        }
+      }
+    }
+  },
+  "$defs": {
+    "stage": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "cmd"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "cmd": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Run with bash -c in the gate cwd. {{baseline}} is replaced by --since <sha> (or the checkpoint baselineSha)."
+          },
+          "optional": {
+            "type": "boolean",
+            "description": "true: a FAIL is reported but does not fail the stage."
+          },
+          "$comment": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}
