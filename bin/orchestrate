@@ -1,0 +1,1558 @@
+#!/usr/bin/env bash
+# orchestrate: run-archive CLI for the claude-orchestrate plugin.
+#
+# bash 3.2 compatible (macOS default shell), Linux too. JSON is handled by
+# python3 (3.9+, standard library only); jq is never required.
+#
+# Every mutating subcommand takes a mkdir lock (<archive>/.lock, 30 s stale
+# recovery), rewrites checkpoint.json as temp file + rename, and validates the
+# result against schemas/checkpoint.schema.json before the rename.
+#
+# Exit codes: 0 ok, 1 error/invalid, 2 refused by policy (budget, lease,
+# dispatch mode), 3 gate FAIL.
+
+set -u
+
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+PLUGIN_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
+SCHEMA_DIR="$PLUGIN_ROOT/schemas"
+CHECKPOINT_SCHEMA="$SCHEMA_DIR/checkpoint.schema.json"
+REPORT_SCHEMA="$SCHEMA_DIR/worker-report.schema.json"
+MANIFEST_SCHEMA="$SCHEMA_DIR/gates-manifest.schema.json"
+
+OPT_ROOT=""
+OPT_RUN="${ORCHESTRATE_RUN:-}"
+ROOT=""
+RUNS_DIR=""
+RUN_ID=""
+ARCHIVE=""
+CHECKPOINT=""
+LOCK_DIR=""
+
+# ---------------------------------------------------------------------------
+# Python helper library. Invoked as: py <op> [args...]
+# ---------------------------------------------------------------------------
+PYLIB=$(cat <<'PY'
+import sys, os, re, json, time, glob, shutil, tempfile
+from datetime import datetime, timezone
+
+def now():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+def die(msg, code=1):
+    sys.stderr.write("orchestrate: " + msg + "\n")
+    sys.exit(code)
+
+def load_json(path, what="file"):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        die("%s not found: %s" % (what, path))
+    except ValueError as e:
+        die("%s is not valid JSON: %s: %s" % (what, path, e))
+
+# ---- minimal structural JSON-schema validator (no jsonschema package) ----
+TYPES = {
+    "string": lambda v: isinstance(v, str),
+    "integer": lambda v: isinstance(v, int) and not isinstance(v, bool),
+    "number": lambda v: isinstance(v, (int, float)) and not isinstance(v, bool),
+    "boolean": lambda v: isinstance(v, bool),
+    "object": lambda v: isinstance(v, dict),
+    "array": lambda v: isinstance(v, list),
+    "null": lambda v: v is None,
+}
+
+def resolve_ref(root, ref):
+    if not ref.startswith("#/"):
+        raise ValueError("unsupported $ref: " + ref)
+    node = root
+    for part in ref[2:].split("/"):
+        part = part.replace("~1", "/").replace("~0", "~")
+        node = node[part]
+    return node
+
+def validate(doc, schema, root=None, path="$", errors=None):
+    if errors is None:
+        errors = []
+    if root is None:
+        root = schema
+    if "$ref" in schema:
+        schema = resolve_ref(root, schema["$ref"])
+    t = schema.get("type")
+    if t is not None:
+        types = t if isinstance(t, list) else [t]
+        if not any(TYPES[x](doc) for x in types):
+            errors.append("%s: expected %s, got %s" % (path, "|".join(types), type(doc).__name__))
+            return errors
+    if "const" in schema and doc != schema["const"]:
+        errors.append("%s: must equal %s" % (path, json.dumps(schema["const"])))
+        return errors
+    if "enum" in schema and doc not in schema["enum"]:
+        errors.append("%s: %s is not one of %s" % (path, json.dumps(doc), json.dumps(schema["enum"])))
+        return errors
+    if isinstance(doc, str):
+        if "minLength" in schema and len(doc) < schema["minLength"]:
+            errors.append("%s: must not be shorter than %d" % (path, schema["minLength"]))
+        if "pattern" in schema and not re.search(schema["pattern"], doc):
+            errors.append("%s: %s does not match %s" % (path, json.dumps(doc), schema["pattern"]))
+    if isinstance(doc, (int, float)) and not isinstance(doc, bool):
+        if "minimum" in schema and doc < schema["minimum"]:
+            errors.append("%s: %s is below minimum %s" % (path, doc, schema["minimum"]))
+        if "maximum" in schema and doc > schema["maximum"]:
+            errors.append("%s: %s is above maximum %s" % (path, doc, schema["maximum"]))
+    if isinstance(doc, dict):
+        for key in schema.get("required", []):
+            if key not in doc:
+                errors.append("%s: missing required key %s" % (path, json.dumps(key)))
+        props = schema.get("properties", {})
+        for key, sub in props.items():
+            if key in doc:
+                validate(doc[key], sub, root, "%s.%s" % (path, key), errors)
+        addl = schema.get("additionalProperties")
+        if addl is not None and addl is not True:
+            for key in doc:
+                if key in props:
+                    continue
+                if addl is False:
+                    errors.append("%s: unexpected key %s" % (path, json.dumps(key)))
+                else:
+                    validate(doc[key], addl, root, "%s.%s" % (path, key), errors)
+    if isinstance(doc, list):
+        if "minItems" in schema and len(doc) < schema["minItems"]:
+            errors.append("%s: must have at least %d item(s)" % (path, schema["minItems"]))
+        if "items" in schema:
+            for i, item in enumerate(doc):
+                validate(item, schema["items"], root, "%s[%d]" % (path, i), errors)
+    return errors
+
+def schema_path(name):
+    d = os.environ.get("ORCH_SCHEMA_DIR")
+    if not d:
+        die("ORCH_SCHEMA_DIR not set")
+    return os.path.join(d, name)
+
+def validate_or_die(doc, schema_file, label, code=1):
+    schema = load_json(schema_file, "schema")
+    errs = validate(doc, schema)
+    if errs:
+        die("%s invalid: %s" % (label, errs[0]), code)
+
+# ---- checkpoint I/O -------------------------------------------------------
+def load_cp(path):
+    return load_json(path, "checkpoint")
+
+def save_cp(cp, path):
+    """Validate, then write temp file + atomic rename. Never writes when invalid."""
+    schema = load_json(schema_path("checkpoint.schema.json"), "schema")
+    errs = validate(cp, schema)
+    if errs:
+        die("refusing to write checkpoint (schema violation): " + errs[0])
+    d = os.path.dirname(os.path.abspath(path)) or "."
+    fd, tmp = tempfile.mkstemp(prefix=".checkpoint.", suffix=".tmp", dir=d)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(cp, f, indent=2, sort_keys=False)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+def parse_opts(args, spec):
+    """spec: {'--name': 'value'|'flag'}. Returns (opts, positionals)."""
+    opts, pos, i = {}, [], 0
+    while i < len(args):
+        a = args[i]
+        if a in spec:
+            if spec[a] == "flag":
+                opts[a] = True
+                i += 1
+            else:
+                if i + 1 >= len(args):
+                    die("option %s needs a value" % a)
+                opts[a] = args[i + 1]
+                i += 2
+        elif a.startswith("--") and "=" in a and a.split("=", 1)[0] in spec:
+            k, v = a.split("=", 1)
+            opts[k] = v
+            i += 1
+        elif a.startswith("--"):
+            die("unknown option %s" % a)
+        else:
+            pos.append(a)
+            i += 1
+    return opts, pos
+
+def to_int(s, name):
+    try:
+        return int(s)
+    except (TypeError, ValueError):
+        die("%s must be an integer, got %r" % (name, s))
+
+def find_unit(cp, uid):
+    for u in cp.get("units", []):
+        if u.get("id") == uid:
+            return u
+    return None
+
+SHIP_UNIT = "ship"          # reserved pseudo-unit: the ship-gate reviewers (review, security, fix, reverify)
+SHIP_ROLES = ("review", "security", "fix", "reverify")
+
+def ship_unit_record():
+    return {"id": SHIP_UNIT, "status": "pending", "tier": "T2", "model": "opus", "effort": "xhigh",
+            "verifier": "none", "isolation": "shared", "dependsOn": [],
+            "sha": "", "evidenceRef": "", "spotCheck": "", "dispatches": []}
+
+def is_ship(unit_or_id):
+    uid = unit_or_id.get("id") if isinstance(unit_or_id, dict) else unit_or_id
+    return uid == SHIP_UNIT
+
+def slots(unit):
+    if is_ship(unit):
+        return 4
+    return 4 if unit.get("verifier", "none") != "none" else 2
+
+def recompute_cap(cp):
+    tally = cp.setdefault("dispatchTally", {"used": 0, "cap": 0})
+    if tally.get("capSource") == "manual":
+        return
+    # the +4 ship-gate slots already cover the reserved 'ship' pseudo-unit
+    cap = sum(slots(u) for u in cp.get("units", []) if not is_ship(u)) + 4
+    tally["cap"] = cap
+    tally["capSource"] = "planned-slots"
+
+def status_word(next_action):
+    """Exactly two terminal tokens: COMPLETED when nextAction is 'ship-gate' or 'complete' (the dispatch
+    loop is done; the ship gate belongs to the orchestrator), else STOPPED-AWAITING-RESUME (a paused run
+    shows 'paused: <reason>' in the next field; the token stays STOPPED-AWAITING-RESUME)."""
+    if next_action in ("complete", "ship-gate"):
+        return "COMPLETED"
+    return "STOPPED-AWAITING-RESUME"
+
+def state_line(cp):
+    sha = cp.get("lastIntegratedSha") or cp.get("baselineSha") or "(none)"
+    tally = cp.get("dispatchTally", {})
+    na = cp.get("nextAction", "")
+    return "STATE: integrated %s · tally %s/%s · next %s · %s" % (
+        sha, tally.get("used", 0), tally.get("cap", 0), na, status_word(na))
+
+CLOSED_STATUSES = ("integrated", "failed", "surfaced")   # a unit the dispatch loop is done with
+
+def first_open_unit(cp):
+    """First non-ship unit still pending or in-flight (None when the dispatch loop is done)."""
+    for u in cp.get("units", []):
+        if is_ship(u):
+            continue
+        if u.get("status") not in CLOSED_STATUSES:
+            return u.get("id")
+    return None
+
+def recompute_next_action(cp):
+    """After a unit status change: keep nextAction while a non-ship unit is in-flight; else dispatch the
+    first pending unit; else (every non-ship unit integrated/failed/surfaced) ship-gate. Paused and
+    complete runs are left alone."""
+    na = str(cp.get("nextAction", ""))
+    if na == "complete" or na.startswith("paused:"):
+        return
+    units = [u for u in cp.get("units", []) if not is_ship(u)]
+    if any(u.get("status") == "in-flight" for u in units):
+        return
+    for u in units:
+        if u.get("status") == "pending":
+            cp["nextAction"] = "dispatch " + str(u.get("id"))
+            return
+    cp["nextAction"] = "ship-gate"
+
+def fmt_dur(sec):
+    sec = int(sec)
+    h, m, s = sec // 3600, (sec % 3600) // 60, sec % 60
+    if h:
+        return "%dh%02dm%02ds" % (h, m, s)
+    if m:
+        return "%dm%02ds" % (m, s)
+    return "%ds" % s
+
+# ---- ops ------------------------------------------------------------------
+def op_validate(args):
+    schema_file, doc_file = args[0], args[1]
+    doc = load_json(doc_file, "document")
+    errs = validate(doc, load_json(schema_file, "schema"))
+    if errs:
+        print("INVALID: " + errs[0])
+        sys.exit(1)
+    print("VALID: " + doc_file)
+
+def op_newest_run(args):
+    runs_dir = args[0]
+    best, best_t = None, -1
+    if os.path.isdir(runs_dir):
+        for name in os.listdir(runs_dir):
+            cp = os.path.join(runs_dir, name, "checkpoint.json")
+            if name.startswith(".") or not os.path.isfile(cp):
+                continue
+            t = os.stat(cp).st_mtime
+            if t > best_t:
+                best, best_t = name, t
+    if best is None:
+        sys.exit(1)
+    print(best)
+
+def op_age(args):
+    try:
+        print(int(time.time() - os.stat(args[0]).st_mtime))
+    except OSError:
+        print(0)
+
+def op_get(args):
+    cp = load_cp(args[0])
+    node = cp
+    for part in args[1].split("."):
+        if isinstance(node, dict) and part in node:
+            node = node[part]
+        else:
+            sys.exit(1)
+    if isinstance(node, str):
+        print(node)
+    else:
+        print(json.dumps(node))
+
+def default_harness():
+    return {"claudeCodeVersion": "unknown", "dispatch": "unknown", "backgroundTasksDisabled": False,
+            "forkModeDisabled": False, "spawnDepth": 0, "subagentModelForce": False,
+            "foremanAllowed": False, "checkedAt": now()}
+
+def harness_from_preflight(text):
+    """Extract the harness object from preflight output (whole text or one JSON line)."""
+    candidates = []
+    try:
+        candidates.append(json.loads(text))
+    except ValueError:
+        for line in text.splitlines():
+            line = line.strip()
+            if line.startswith("{"):
+                try:
+                    candidates.append(json.loads(line))
+                except ValueError:
+                    pass
+    h = default_harness()
+    for c in candidates:
+        if not isinstance(c, dict):
+            continue
+        src = c.get("harness") if isinstance(c.get("harness"), dict) else c
+        for k in list(h.keys()):
+            if k in src and k != "checkedAt":
+                h[k] = src[k]
+        if "foremanAllowed" not in src and isinstance(c.get("verdict"), str):
+            h["foremanAllowed"] = c["verdict"] != "foreman-refused"
+        h["checkedAt"] = src.get("checkedAt") or now()
+        break
+    # coerce types so a partial preflight cannot produce an invalid checkpoint
+    h["spawnDepth"] = int(h["spawnDepth"]) if str(h["spawnDepth"]).isdigit() else 0
+    for k in ("backgroundTasksDisabled", "forkModeDisabled", "subagentModelForce", "foremanAllowed"):
+        h[k] = bool(h[k]) if isinstance(h[k], bool) else str(h[k]).lower() in ("1", "true", "yes")
+    h["claudeCodeVersion"] = str(h["claudeCodeVersion"])
+    if h["dispatch"] not in ("foreground", "background", "foreground-on-request", "unknown"):
+        h["dispatch"] = "unknown"
+    return h
+
+def op_init_seed(args):
+    out, run_id, root, branch, baseline, mode, cap, preflight_file = args[:8]
+    harness = default_harness()
+    if preflight_file and os.path.isfile(preflight_file):
+        with open(preflight_file, "r", encoding="utf-8", errors="replace") as f:
+            harness = harness_from_preflight(f.read())
+    cp = {
+        "schemaVersion": 2,
+        "runId": run_id,
+        "integrationRoot": root,
+        "integrationBranch": branch,
+        "baselineSha": baseline,
+        "lastIntegratedSha": "",
+        "dispatchMode": mode,
+        "harness": harness,
+        "dispatchTally": {"used": 0, "cap": 0, "capSource": "planned-slots"},
+        "owner": {"agentId": "orchestrator", "epoch": 1},
+        "stallCount": 0,
+        "lastStallAt": "",
+        "openWorktrees": [],
+        "units": [ship_unit_record()],
+        "nextAction": "setup",
+    }
+    if cap != "-":
+        cp["dispatchTally"] = {"used": 0, "cap": to_int(cap, "--cap"), "capSource": "manual"}
+    save_cp(cp, out)
+
+def op_plan_set(args):
+    cp_path, uid = args[0], args[1]
+    opts, _ = parse_opts(args[2:], {"--tier": "v", "--model": "v", "--effort": "v", "--verifier": "v",
+                                     "--isolation": "v", "--depends": "v"})
+    if is_ship(uid):
+        die("plan set: '%s' is reserved for the ship-gate pseudo-unit (seeded by init; dispatch open ship --role review|security|fix|reverify)" % uid)
+    cp = load_cp(cp_path)
+    u = find_unit(cp, uid)
+    if u is None:
+        u = {"id": uid, "status": "pending", "sha": "", "evidenceRef": "", "spotCheck": "", "dispatches": []}
+        units = cp.setdefault("units", [])
+        if units and is_ship(units[-1]):
+            units.insert(len(units) - 1, u)   # keep the reserved ship record last
+        else:
+            units.append(u)
+    for k in ("tier", "model", "effort", "verifier", "isolation"):
+        v = opts.get("--" + k)
+        if v is not None:
+            u[k] = v
+    u.setdefault("tier", "T1")
+    u.setdefault("model", "sonnet")
+    u.setdefault("effort", "medium")
+    u.setdefault("verifier", "fast")
+    u.setdefault("isolation", "worktree")
+    u.setdefault("dispatches", [])
+    if "--depends" in opts:
+        u["dependsOn"] = [x.strip() for x in opts["--depends"].split(",") if x.strip()]
+    u.setdefault("dependsOn", [])
+    recompute_cap(cp)
+    save_cp(cp, cp_path)
+    t = cp["dispatchTally"]
+    print("unit %s: tier %s model %s effort %s verifier %s isolation %s slots %d; cap %d (%s)" % (
+        uid, u["tier"], u["model"], u["effort"], u["verifier"], u["isolation"], slots(u), t["cap"], t.get("capSource", "")))
+
+def op_unit_set(args):
+    cp_path, uid, status = args[0], args[1], args[2]
+    opts, _ = parse_opts(args[3:], {"--sha": "v", "--evidence": "v", "--spot-check": "v"})
+    cp = load_cp(cp_path)
+    u = find_unit(cp, uid)
+    if u is None:
+        die("unknown unit %s" % uid)
+    u["status"] = status
+    if "--sha" in opts:
+        u["sha"] = opts["--sha"]
+    if "--evidence" in opts:
+        u["evidenceRef"] = opts["--evidence"]
+    if "--spot-check" in opts:
+        u["spotCheck"] = opts["--spot-check"]
+    if status == "integrated" and opts.get("--sha"):
+        cp["lastIntegratedSha"] = opts["--sha"]
+    if not is_ship(u):            # the ship record never moves nextAction
+        recompute_next_action(cp)
+    save_cp(cp, cp_path)
+    print("unit %s: %s" % (uid, status))
+
+def op_dispatch_open(args):
+    cp_path, uid = args[0], args[1]
+    opts, _ = parse_opts(args[2:], {"--role": "v", "--epoch": "v", "--model": "v", "--effort": "v"})
+    if "--role" not in opts or "--epoch" not in opts:
+        die("dispatch open needs --role and --epoch")
+    role = opts["--role"]
+    if role not in ("worker", "verifier", "fix", "reverify", "review", "security"):
+        die("unknown role %s" % role)
+    epoch = to_int(opts["--epoch"], "--epoch")
+    cp = load_cp(cp_path)
+    if uid == "-":
+        uid = SHIP_UNIT
+    u = find_unit(cp, uid)
+    if u is None and is_ship(uid):
+        u = ship_unit_record()          # archive created before the ship record was seeded
+        cp.setdefault("units", []).append(u)
+    if u is None:
+        die("unknown unit %s (run 'orchestrate plan set %s ...' first)" % (uid, uid))
+    if is_ship(u) and role not in SHIP_ROLES:
+        die("dispatch open ship: role must be one of %s (the ship gate has no worker/verifier slots)" % "|".join(SHIP_ROLES))
+    owner_epoch = cp.get("owner", {}).get("epoch", 1)
+    if epoch != owner_epoch:
+        die("refused: lease epoch %d does not match owner.epoch %d (owner %s); you have been taken over, abort and report"
+            % (epoch, owner_epoch, cp.get("owner", {}).get("agentId", "")), 2)
+    if cp.get("nextAction") == "complete":
+        die("refused: nextAction is complete; the run is done", 2)
+    if str(cp.get("nextAction", "")).startswith("paused:"):
+        die("refused: run is paused: run " + chr(96) + "orchestrate resume" + chr(96) + " first", 2)
+    tally = cp.setdefault("dispatchTally", {"used": 0, "cap": 0})
+    used, cap = tally.get("used", 0), tally.get("cap", 0)
+    if cap > 0 and used >= cap:
+        die("refused: dispatch cap reached (%d/%d); stop and surface" % (used, cap), 2)
+    dispatches = u.setdefault("dispatches", [])
+    if role == "worker" and not is_ship(u):
+        workers = sum(1 for d in dispatches if d.get("role") == "worker")
+        if workers >= 3:
+            die("refused: unit %s already has %d worker dispatches (per-unit retry budget is 3); surface it" % (uid, workers), 2)
+    n = len(dispatches) + 1
+    rec = {"n": n, "role": role, "model": opts.get("--model", u.get("model", "")),
+           "effort": opts.get("--effort", u.get("effort", "")), "epoch": epoch,
+           "openedAt": now(), "closedAt": "", "durationSec": 0, "tokens": 0,
+           "result": "open", "evidenceRef": ""}
+    dispatches.append(rec)
+    tally["used"] = used + 1
+    if is_ship(u):
+        cp["nextAction"] = "ship-gate"      # the ship record's status is left to 'unit set' (pending|integrated|failed)
+    else:
+        u["status"] = "in-flight"
+        cp["nextAction"] = "dispatch " + uid
+    save_cp(cp, cp_path)
+    print(n)
+
+def op_dispatch_close(args):
+    cp_path, uid, n = args[0], args[1], to_int(args[2], "n")
+    opts, _ = parse_opts(args[3:], {"--exit": "v", "--tokens": "v", "--duration": "v", "--evidence": "v",
+                                     "--tokens-in": "v", "--tokens-out": "v"})
+    if opts.get("--exit") not in ("PASS", "FAIL"):
+        die("dispatch close needs --exit PASS|FAIL")
+    cp = load_cp(cp_path)
+    u = find_unit(cp, uid)
+    if u is None:
+        die("unknown unit %s" % uid)
+    rec = None
+    for d in u.get("dispatches", []):
+        if d.get("n") == n:
+            rec = d
+    if rec is None:
+        die("unit %s has no dispatch %d" % (uid, n))
+    rec["closedAt"] = now()
+    rec["result"] = opts["--exit"]
+    if "--tokens" in opts:
+        rec["tokens"] = to_int(opts["--tokens"], "--tokens")
+    if "--tokens-in" in opts:
+        rec["tokensIn"] = to_int(opts["--tokens-in"], "--tokens-in")
+    if "--tokens-out" in opts:
+        rec["tokensOut"] = to_int(opts["--tokens-out"], "--tokens-out")
+    if "tokensIn" in rec or "tokensOut" in rec:
+        if "--tokens" not in opts:
+            rec["tokens"] = rec.get("tokensIn", 0) + rec.get("tokensOut", 0)
+    if "--duration" in opts:
+        rec["durationSec"] = to_int(opts["--duration"], "--duration")
+    if "--evidence" in opts:
+        rec["evidenceRef"] = opts["--evidence"]
+    save_cp(cp, cp_path)
+    print("dispatch %s#%d: %s" % (uid, n, rec["result"]))
+
+def op_lease_take(args):
+    cp_path = args[0]
+    opts, _ = parse_opts(args[1:], {"--agent": "v", "--expect": "v"})
+    if "--agent" not in opts:
+        die("lease take needs --agent <id>")
+    cp = load_cp(cp_path)
+    owner = cp.setdefault("owner", {"agentId": "", "epoch": 1})
+    if "--expect" in opts and to_int(opts["--expect"], "--expect") != owner.get("epoch", 1):
+        die("refused: expected epoch %s but owner.epoch is %s (someone else took over first)"
+            % (opts["--expect"], owner.get("epoch", 1)), 2)
+    owner["epoch"] = owner.get("epoch", 1) + 1
+    owner["agentId"] = opts["--agent"]
+    if opts["--agent"] == "orchestrator":
+        cp["dispatchMode"] = "DIRECT"
+    save_cp(cp, cp_path)
+    print(owner["epoch"])
+
+def op_lease_check(args):
+    cp_path = args[0]
+    opts, _ = parse_opts(args[1:], {"--epoch": "v"})
+    if "--epoch" not in opts:
+        die("lease check needs --epoch <n>")
+    cp = load_cp(cp_path)
+    cur = cp.get("owner", {}).get("epoch", 1)
+    if to_int(opts["--epoch"], "--epoch") == cur:
+        print("current: epoch %d owner %s" % (cur, cp.get("owner", {}).get("agentId", "")))
+        sys.exit(0)
+    print("superseded: owner.epoch is %d (owner %s)" % (cur, cp.get("owner", {}).get("agentId", "")))
+    sys.exit(2)
+
+def op_stall_record(args):
+    cp = load_cp(args[0])
+    cp["stallCount"] = cp.get("stallCount", 0) + 1
+    cp["lastStallAt"] = now()
+    save_cp(cp, args[0])
+    print("stallCount %d at %s" % (cp["stallCount"], cp["lastStallAt"]))
+
+def op_worktree_register(args):
+    cp_path, uid, path, branch, sha = args[:5]
+    cp = load_cp(cp_path)
+    wts = cp.setdefault("openWorktrees", [])
+    wts[:] = [w for w in wts if w.get("unit") != uid]
+    wts.append({"path": path, "branch": branch, "unit": uid, "baselineSha": sha})
+    save_cp(cp, cp_path)
+
+def op_worktree_deregister(args):
+    cp_path, uid = args[0], args[1]
+    cp = load_cp(cp_path)
+    wts = cp.setdefault("openWorktrees", [])
+    found = [w for w in wts if w.get("unit") == uid]
+    if not found:
+        die("no open worktree registered for unit %s" % uid)
+    wts[:] = [w for w in wts if w.get("unit") != uid]
+    save_cp(cp, cp_path)
+    print(found[0].get("path", ""))
+
+def op_worktree_path(args):
+    cp = load_cp(args[0])
+    for w in cp.get("openWorktrees", []):
+        if w.get("unit") == args[1]:
+            print(w.get("path", ""))
+            return
+    sys.exit(1)
+
+def op_pause(args):
+    cp_path = args[0]
+    opts, _ = parse_opts(args[1:], {"--reason": "v"})
+    if not opts.get("--reason"):
+        die("pause needs --reason <text>")
+    cp = load_cp(cp_path)
+    cp["nextAction"] = "paused: " + opts["--reason"]
+    save_cp(cp, cp_path)
+    print(state_line(cp))
+
+def op_resume(args):
+    cp = load_cp(args[0])
+    uid = first_open_unit(cp)
+    cp["nextAction"] = ("dispatch " + uid) if uid else "ship-gate"
+    save_cp(cp, args[0])
+    print(state_line(cp))
+
+def op_handoff(args):
+    cp_path = args[0]
+    opts, _ = parse_opts(args[1:], {"--to": "v"})
+    to = opts.get("--to")
+    if to not in ("foreman", "orchestrator"):
+        die("handoff needs --to foreman|orchestrator")
+    cp = load_cp(cp_path)
+    cp.setdefault("owner", {"agentId": "", "epoch": 1})["agentId"] = to
+    cp["dispatchMode"] = "FOREMAN" if to == "foreman" else "DIRECT"
+    save_cp(cp, cp_path)
+    print("owner %s epoch %d dispatchMode %s" % (to, cp["owner"]["epoch"], cp["dispatchMode"]))
+
+def op_next_set(args):
+    cp = load_cp(args[0])
+    cp["nextAction"] = args[1]
+    save_cp(cp, args[0])
+    print(state_line(cp))
+
+HARNESS_DISPATCH = ("foreground", "background", "foreground-on-request", "unknown")
+
+def op_harness_set(args):
+    """harness set <key> <value>: records the foreman's Agent probe result (harness.dispatch)."""
+    cp_path, key, value = args[0], args[1], args[2]
+    if key != "dispatch":
+        die("harness set: only the key 'dispatch' can be set (got %s)" % key)
+    if value not in HARNESS_DISPATCH:
+        die("harness set dispatch: value must be one of %s (got %s)" % ("|".join(HARNESS_DISPATCH), value))
+    cp = load_cp(cp_path)
+    h = cp.setdefault("harness", default_harness())
+    h["dispatch"] = value
+    h["checkedAt"] = now()
+    save_cp(cp, cp_path)
+    print("harness.dispatch %s (checkedAt %s)" % (value, h["checkedAt"]))
+
+def op_status(args):
+    cp = load_cp(args[0])
+    print(state_line(cp))
+
+def op_cost(args):
+    cp = load_cp(args[0])
+    manifest = load_json(args[1], "manifest") if len(args) > 1 and args[1] != "-" else {}
+    pricing = manifest.get("pricing", {}) if isinstance(manifest, dict) else {}
+    per = {}
+    order = []
+    total_d = total_t = total_s = 0
+    usd_total, usd_known = 0.0, False
+    for u in cp.get("units", []):
+        for d in u.get("dispatches", []):
+            m = d.get("model") or "unknown"
+            if m not in per:
+                per[m] = {"dispatches": 0, "tokens": 0, "sec": 0, "usd": 0.0, "usd_known": False}
+                order.append(m)
+            p = per[m]
+            p["dispatches"] += 1
+            p["tokens"] += int(d.get("tokens", 0) or 0)
+            p["sec"] += int(d.get("durationSec", 0) or 0)
+            total_d += 1
+            total_t += int(d.get("tokens", 0) or 0)
+            total_s += int(d.get("durationSec", 0) or 0)
+            rate = pricing.get(m) if isinstance(pricing.get(m), dict) else None
+            if rate:
+                usd = None
+                # a rate of 0 (the unedited example) is "no pricing", never "free"
+                in_rate, out_rate, blended = rate.get("inPerMTok") or 0, rate.get("outPerMTok") or 0, rate.get("perMTok") or 0
+                if "tokensIn" in d or "tokensOut" in d:
+                    if in_rate > 0 or out_rate > 0:
+                        usd = (d.get("tokensIn", 0) * in_rate + d.get("tokensOut", 0) * out_rate) / 1e6
+                if usd is None and blended > 0:
+                    usd = int(d.get("tokens", 0) or 0) * blended / 1e6
+                if usd is not None:
+                    p["usd"] += usd
+                    p["usd_known"] = True
+                    usd_total += usd
+                    usd_known = True
+    for m in order:
+        p = per[m]
+        line = "%-8s %3d dispatches  %10d tokens  %10s" % (m, p["dispatches"], p["tokens"], fmt_dur(p["sec"]))
+        if p["usd_known"]:
+            line += "  USD %.2f" % p["usd"]
+        print(line)
+    parts = ["%s %d/%dk tok/%s" % (m, per[m]["dispatches"], per[m]["tokens"] // 1000, fmt_dur(per[m]["sec"])) for m in order]
+    summary = "COST: %d dispatches · %d tokens · %s" % (total_d, total_t, fmt_dur(total_s))
+    if parts:
+        summary += " · " + ", ".join(parts)
+    if usd_known:
+        summary += " · USD %.2f" % usd_total
+    else:
+        summary += " · USD n/a (no pricing in manifest)"
+    print(summary)
+
+def op_archive_check(args):
+    cp_path, archive, exclude_ok = args[0], args[1], args[2] == "1"
+    findings = []
+    try:
+        cp = load_json(cp_path, "checkpoint")
+    except SystemExit:
+        print("FINDING: checkpoint unreadable: " + cp_path)
+        sys.exit(1)
+    errs = validate(cp, load_json(schema_path("checkpoint.schema.json"), "schema"))
+    for e in errs[:5]:
+        findings.append("checkpoint schema: " + e)
+    for d in ("dispatch", "reports", "gates", "failures"):
+        if not os.path.isdir(os.path.join(archive, d)):
+            findings.append("missing directory %s/" % d)
+    if not os.path.isfile(os.path.join(archive, "dispatch-log.md")):
+        findings.append("missing dispatch-log.md")
+    if not exclude_ok:
+        findings.append(".claude/orchestrate-runs/ is neither in .git/info/exclude nor ignored by .gitignore")
+    total = 0
+    for u in cp.get("units", []) if isinstance(cp.get("units"), list) else []:
+        uid = u.get("id", "?")
+        ds = u.get("dispatches", []) if isinstance(u.get("dispatches"), list) else []
+        total += len(ds)
+        if u.get("status") == "integrated" and not is_ship(u):
+            if not u.get("sha"):
+                findings.append("unit %s is integrated without sha" % uid)
+            if not u.get("evidenceRef"):
+                findings.append("unit %s is integrated without evidenceRef" % uid)
+            if u.get("verifier") == "none" and not u.get("spotCheck"):
+                findings.append("unit %s skipped Gate 2 (verifier none) but has no spotCheck" % uid)
+        if cp.get("nextAction") == "complete" and not is_ship(u) and u.get("status") not in CLOSED_STATUSES:
+            findings.append("unit %s is %s in a complete run (every unit must be integrated, failed or surfaced)"
+                            % (uid, u.get("status")))
+        for d in ds:
+            if d.get("result") == "open" and cp.get("nextAction") == "complete":
+                findings.append("unit %s dispatch %s is still open in a complete run" % (uid, d.get("n")))
+    used = cp.get("dispatchTally", {}).get("used")
+    if used != total:
+        findings.append("dispatchTally.used=%s but %d dispatches are recorded" % (used, total))
+    for w in cp.get("openWorktrees", []) if isinstance(cp.get("openWorktrees"), list) else []:
+        if not os.path.isdir(w.get("path", "")):
+            findings.append("openWorktrees path missing: %s (unit %s)" % (w.get("path"), w.get("unit")))
+        if not w.get("branch"):
+            findings.append("openWorktrees entry for unit %s has no branch (detached HEAD: its commits dangle on remove)" % w.get("unit"))
+    if findings:
+        for f in findings:
+            print("FINDING: " + f)
+        print("archive check: %d finding(s)" % len(findings))
+        sys.exit(1)
+    print("archive check: OK (%s)" % archive)
+
+FENCE = chr(96) * 3   # a markdown code fence (kept out of the source: this library lives inside a bash $( ) heredoc)
+FENCE_RE = re.compile(r"\A\s*" + FENCE + r"[A-Za-z0-9_-]*[ \t]*\r?\n(.*?)\r?\n?[ \t]*" + FENCE + r"\s*\Z", re.DOTALL)
+
+def load_report(path):
+    """A worker report file holds either a bare JSON object or the worker's verbatim fenced block
+    (optional leading fence line with or without the json tag, optional trailing fence)."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            text = f.read()
+    except FileNotFoundError:
+        die("report not found: %s" % path)
+    m = FENCE_RE.match(text)
+    body = m.group(1) if m else text
+    try:
+        return json.loads(body)
+    except ValueError as e:
+        die("report is not valid JSON (a bare object or one fenced json block is expected): %s: %s" % (path, e))
+
+def op_report_check(args):
+    # report-check <file> [unit|-] [out]: validate; with <out>, write the normalized JSON there
+    path = args[0]
+    want_unit = args[1] if len(args) > 1 and args[1] != "-" else None
+    out = args[2] if len(args) > 2 else None
+    doc = load_report(path)
+    errs = validate(doc, load_json(schema_path("worker-report.schema.json"), "schema"))
+    if errs:
+        print("INVALID: " + errs[0])
+        sys.exit(1)
+    if want_unit is not None and doc.get("unit") != want_unit:
+        print("INVALID: report unit %s does not match %s" % (json.dumps(doc.get("unit")), want_unit))
+        sys.exit(1)
+    if doc.get("backgroundProcesses") != "none":
+        print("INVALID: backgroundProcesses must be the literal \"none\"")
+        sys.exit(1)
+    failing = [g for g in doc.get("gates", []) if g.get("exit", 0) != 0]
+    if failing:
+        flagged = [c for c in doc.get("criteria", []) if c.get("status") in ("FAIL", "EXECUTION-PENDING")]
+        if not flagged:
+            print("INVALID: gate %s exited %s but no criterion is marked FAIL or EXECUTION-PENDING"
+                  % (failing[0].get("id"), failing[0].get("exit")))
+            sys.exit(1)
+    if out:
+        with open(out, "w", encoding="utf-8") as f:
+            json.dump(doc, f, indent=2)
+            f.write("\n")
+    print("VALID: %s (unit %s, %d criteria, %d gates)" % (path, doc.get("unit"), len(doc.get("criteria", [])), len(doc.get("gates", []))))
+
+STAGE_FALLBACK = {"integration": ["unit"], "ship": ["integration", "unit"]}
+
+def print_cmds(cmds, baseline):
+    """cmds: [{id, cmd, optional?}] -> one TSV line each: id, optional(0|1), cmd ({{baseline}} substituted)."""
+    for c in cmds:
+        cmd = c["cmd"]
+        if "{{baseline}}" in cmd:
+            if not baseline:
+                die("gate %s uses {{baseline}} but no --since sha and no checkpoint baselineSha are available" % c["id"])
+            cmd = cmd.replace("{{baseline}}", baseline)
+        cmd = cmd.replace("\t", " ").replace("\n", " ")
+        print("%s\t%s\t%s" % (c["id"], "1" if c.get("optional") else "0", cmd))
+
+def op_manifest_cmds(args):
+    manifest_file, stage, baseline = args[0], args[1], args[2]
+    m = load_json(manifest_file, "manifest")
+    validate_or_die(m, schema_path("gates-manifest.schema.json"), "manifest")
+    gates = m.get("gates", {})
+    cmds = gates.get(stage)
+    if not cmds:
+        for other in STAGE_FALLBACK.get(stage, []):
+            if gates.get(other):
+                sys.stderr.write("%s: no %s gates in the manifest, using the %s gates\n" % (stage, stage, other))
+                cmds = gates[other]
+                break
+    if not cmds:
+        die("no gates for stage %s in %s" % (stage, manifest_file))
+    print_cmds(cmds, baseline)
+
+def op_arg_cmds(args):
+    # arg-cmds <baseline> <id=command>...: gate commands given on the command line (--cmd)
+    baseline, cmds, seen = args[0], [], set()
+    for spec in args[1:]:
+        if "=" not in spec:
+            die("--cmd needs <id>=<command>, got %r" % spec)
+        cid, cmd = spec.split("=", 1)
+        cid, cmd = cid.strip(), cmd.strip()
+        if not re.match(r"^[A-Za-z0-9_.-]+$", cid):
+            die("--cmd: gate id %r must be [A-Za-z0-9_.-]+" % cid)
+        if not cmd:
+            die("--cmd %s: empty command" % cid)
+        if cid in seen:
+            die("--cmd: duplicate gate id %s" % cid)
+        seen.add(cid)
+        cmds.append({"id": cid, "cmd": cmd})
+    print_cmds(cmds, baseline)
+
+def op_report_cmds(args):
+    # report-cmds <reports dir> <unit> <baseline>: gates[] of the unit's newest saved report
+    reports_dir, unit, baseline = args[0], args[1], args[2]
+    best, best_n = None, 0
+    for f in glob.glob(os.path.join(reports_dir, glob.escape(unit) + "-*.json")):
+        m = re.match(r"^" + re.escape(unit) + r"-(\d+)\.json$", os.path.basename(f))
+        if m and int(m.group(1)) > best_n:
+            best, best_n = f, int(m.group(1))
+    if best is None:
+        sys.exit(1)
+    doc = load_json(best, "report")
+    gates = doc.get("gates") if isinstance(doc, dict) else None
+    if not isinstance(gates, list) or not gates:
+        die("saved report %s lists no gates[]" % best)
+    cmds = [{"id": str(g.get("id", "")), "cmd": str(g.get("cmd", ""))} for g in gates if isinstance(g, dict)]
+    if any(not c["id"] or not c["cmd"] for c in cmds):
+        die("saved report %s has a gate without id or cmd" % best)
+    sys.stderr.write("gate commands from %s\n" % best)
+    print_cmds(cmds, baseline)
+
+def op_manifest_get(args):
+    m = load_json(args[0], "manifest")
+    validate_or_die(m, schema_path("gates-manifest.schema.json"), "manifest")
+    v = m.get(args[1], "")
+    print(v if isinstance(v, str) else json.dumps(v))
+
+def op_cache_clean(args):
+    manifest_file, cwd = args[0], args[1]
+    m = load_json(manifest_file, "manifest")
+    root = os.path.realpath(cwd)
+    protected = ("node_modules", ".git")
+    for pat in m.get("cachePaths", []):
+        for hit in sorted(set(glob.glob(os.path.join(root, pat), recursive=True))):
+            real = os.path.realpath(hit)
+            if not real.startswith(root + os.sep):
+                continue
+            # never reach into installed dependencies or the repository database
+            parts = set(os.path.relpath(hit, root).split(os.sep)) | set(os.path.relpath(real, root).split(os.sep))
+            if any(x in parts for x in protected):
+                continue
+            if os.path.isdir(real) and not os.path.islink(real):
+                shutil.rmtree(real, ignore_errors=True)
+            else:
+                try:
+                    os.unlink(real)
+                except OSError:
+                    pass
+            print("cold: removed " + os.path.relpath(real, root))
+
+def op_gate_json(args):
+    out, stage, cold, unit, cwd, tsv = args[:6]
+    cmds, failed = [], False
+    with open(tsv, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.rstrip("\n")
+            if not line:
+                continue
+            cid, cmd, rc, dur, optional = line.split("\t")
+            rc, dur, optional = int(rc), int(dur), optional == "1"
+            cmds.append({"id": cid, "cmd": cmd, "exit": rc, "durationSec": dur, "optional": optional})
+            if rc != 0 and not optional:
+                failed = True
+    doc = {"stage": stage, "cold": cold == "1", "unit": unit, "cwd": cwd, "finishedAt": now(),
+           "cmds": cmds, "result": "FAIL" if failed else "PASS"}
+    tmp = out + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(doc, f, indent=2)
+        f.write("\n")
+    os.replace(tmp, out)
+    print(doc["result"])
+
+OPS = {
+    "validate": op_validate, "newest-run": op_newest_run, "age": op_age, "get": op_get,
+    "init-seed": op_init_seed, "plan-set": op_plan_set, "unit-set": op_unit_set,
+    "dispatch-open": op_dispatch_open, "dispatch-close": op_dispatch_close,
+    "lease-take": op_lease_take, "lease-check": op_lease_check, "stall-record": op_stall_record,
+    "worktree-register": op_worktree_register, "worktree-deregister": op_worktree_deregister,
+    "worktree-path": op_worktree_path, "pause": op_pause, "resume": op_resume, "handoff": op_handoff,
+    "next-set": op_next_set, "harness-set": op_harness_set, "status": op_status, "cost": op_cost, "archive-check": op_archive_check,
+    "report-check": op_report_check, "manifest-cmds": op_manifest_cmds, "manifest-get": op_manifest_get,
+    "arg-cmds": op_arg_cmds, "report-cmds": op_report_cmds,
+    "cache-clean": op_cache_clean, "gate-json": op_gate_json,
+}
+
+if __name__ == "__main__":
+    if len(sys.argv) < 2 or sys.argv[1] not in OPS:
+        die("internal: unknown python op")
+    try:
+        OPS[sys.argv[1]](sys.argv[2:])
+    except IndexError:
+        die("internal: missing argument for " + sys.argv[1])
+PY
+)
+
+py() {
+  ORCH_SCHEMA_DIR="$SCHEMA_DIR" python3 -c "$PYLIB" "$@"
+}
+
+die() {
+  echo "orchestrate: $*" >&2
+  exit 1
+}
+
+usage() {
+  cat <<'EOF'
+usage: orchestrate [--root <path>] [--run <id>] <subcommand> [args]
+
+  preflight [--json]                                  run scripts/preflight.sh; harness JSON + verdict; exit 0 allowed, 2 refused, 1 error
+  init [--run <id>] [--branch <name>] [--cap <n>] [--mode FOREMAN|DIRECT]
+                                                      create the run archive atomically (orchestrator only); exclude it from git; print path + run id
+  plan set <id> --tier T0..T3 --model <alias> --effort <e> --verifier none|fast|deep [--isolation worktree|shared] [--depends a,b]
+                                                      add or update a planned unit; recompute the cap from planned slots
+                                                      ('ship' is reserved: init seeds it as the ship-gate pseudo-unit, outside the slot sum)
+  unit set <id> <status> [--sha <sha>] [--evidence <ref>] [--spot-check <text>]
+                                                      set a unit status (pending|in-flight|integrated|failed|surfaced); recomputes nextAction
+                                                      (in-flight unit → unchanged; first pending → "dispatch <id>"; none → "ship-gate";
+                                                      paused/complete runs and the ship record leave it alone)
+  dispatch open <unit> --role worker|verifier|fix|reverify|review|security --epoch <n> [--model <alias>] [--effort <e>]
+                                                      record a dispatch (exit 2 when refused: epoch, cap, complete, paused, 3 workers); prints n
+                                                      ship-gate reviewers: dispatch open ship --role review|security|fix|reverify --epoch <n>
+  dispatch close <unit> <n> --exit PASS|FAIL [--tokens <int>] [--duration <sec>] [--evidence <ref>] [--tokens-in <int>] [--tokens-out <int>]
+                                                      close a dispatch with its usage and result
+  lease take --agent <id> [--expect <epoch>]          take the dispatch lease (bumps the epoch; exit 2 when --expect mismatches)
+  lease check --epoch <n>                             exit 0 when the epoch is current, 2 when superseded
+  handoff --to foreman|orchestrator                   planned handoff: owner + dispatchMode change, epoch kept
+  stall record                                        increment stallCount, set lastStallAt
+  worktree add <unit> --at <sha> [--branch <name>] [--path <dir>] [--no-bootstrap] [--detach]
+                                                      git worktree add on branch unit/<unit> (default; --branch overrides; an existing branch is
+                                                      reused only when it points at <sha>) + manifest envBootstrap/install; registers in
+                                                      openWorktrees; prints "<path> <branch>". --detach: detached HEAD, prints the path only
+  worktree remove <unit> [--force]                    git worktree remove + deregister (--force drops uncommitted tracked changes)
+  gate run <unit> unit|integration|ship [--cwd <dir>] [--cold] [--since <sha>] [--cmd <id>=<command>]...
+                                                      run the stage's gates; log + json per run under gates/; exit 3 on FAIL (unit '-' = whole run).
+                                                      Commands come from --cmd (repeatable; overrides the manifest), else the manifest
+                                                      (.claude/orchestrate-gates.json or orchestrate-gates.json; a missing integration/ship stage
+                                                      falls back to the previous stage), else the unit's newest reports/<unit>-<n>.json gates[]
+  report validate <file>                              validate a worker report against schemas/worker-report.schema.json; the file may hold a
+                                                      bare JSON object or the worker's verbatim fenced block (```json ... ```)
+  report save <unit> <file>                           validate (Gate 1 rules, unit must match) and copy (fences stripped) to reports/<unit>-<n>.json
+  archive check                                       audit the archive; print findings; exit 1 on any
+  status                                              print the STATE line from disk (token COMPLETED when nextAction is "ship-gate" or "complete",
+                                                      else STOPPED-AWAITING-RESUME)
+  cost                                                per-model dispatches, tokens, duration; USD when the manifest has pricing
+  stale [--minutes 20]                                exit 0 when checkpoint mtime is within the window, 2 when stale
+  pause --reason <text>                               set nextAction to "paused: <text>" (dispatch open is refused until resume)
+  resume                                              set nextAction back to "dispatch <first pending/in-flight unit>" ("ship-gate" when none)
+  next set <text>                                     set nextAction verbatim (use "complete" when the plan is done)
+  harness set dispatch foreground|background          record the foreman's Agent probe result in harness.dispatch
+  help                                                this text
+
+Run selection: --run <id> or ORCHESTRATE_RUN, else the newest checkpoint under <root>/.claude/orchestrate-runs/.
+Root: --root <path>, else git rev-parse --show-toplevel of the cwd.
+Exit codes: 0 ok, 1 error/invalid, 2 refused by policy, 3 gate FAIL.
+EOF
+}
+
+# ---------------------------------------------------------------------------
+# Root, run and lock handling
+# ---------------------------------------------------------------------------
+resolve_root() {
+  if [ -n "$OPT_ROOT" ]; then
+    ROOT=$(git -C "$OPT_ROOT" rev-parse --show-toplevel 2>/dev/null) || die "--root $OPT_ROOT is not inside a git repository"
+  else
+    ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || die "not inside a git repository (use --root <path>)"
+  fi
+  RUNS_DIR="$ROOT/.claude/orchestrate-runs"
+}
+
+resolve_run() {
+  resolve_root
+  if [ -n "$OPT_RUN" ]; then
+    RUN_ID="$OPT_RUN"
+  else
+    RUN_ID=$(py newest-run "$RUNS_DIR") || die "no run archive under $RUNS_DIR (run 'orchestrate init' first)"
+  fi
+  ARCHIVE="$RUNS_DIR/$RUN_ID"
+  CHECKPOINT="$ARCHIVE/checkpoint.json"
+  [ -f "$CHECKPOINT" ] || die "no checkpoint at $CHECKPOINT"
+}
+
+release_lock() {
+  if [ -n "$LOCK_DIR" ] && [ -d "$LOCK_DIR" ]; then
+    rm -f "$LOCK_DIR/pid" 2>/dev/null
+    rmdir "$LOCK_DIR" 2>/dev/null || rm -rf "$LOCK_DIR" 2>/dev/null
+  fi
+  LOCK_DIR=""
+}
+
+take_lock() {
+  local lock="$ARCHIVE/.lock" tries=0 age
+  while ! mkdir "$lock" 2>/dev/null; do
+    age=$(py age "$lock" 2>/dev/null || echo 0)
+    if [ "${age:-0}" -ge 30 ]; then
+      echo "orchestrate: recovering stale lock $lock (${age}s old)" >&2
+      rm -rf "$lock" 2>/dev/null
+      continue
+    fi
+    tries=$((tries + 1))
+    [ "$tries" -gt 300 ] && die "could not take lock $lock after 60 s"
+    sleep 0.2
+  done
+  LOCK_DIR="$lock"
+  echo "$$" > "$lock/pid" 2>/dev/null || true
+  trap release_lock EXIT
+}
+
+locked_py() {
+  # Runs a mutating python op under the archive lock; propagates its exit code.
+  local rc
+  take_lock
+  py "$@"
+  rc=$?
+  release_lock
+  return $rc
+}
+
+manifest_path() {
+  if [ -f "$ROOT/.claude/orchestrate-gates.json" ]; then
+    echo "$ROOT/.claude/orchestrate-gates.json"
+  elif [ -f "$ROOT/orchestrate-gates.json" ]; then
+    echo "$ROOT/orchestrate-gates.json"
+  else
+    return 1
+  fi
+}
+
+exclude_add() {
+  # exclude_add <pattern>: idempotently add <pattern> to .git/info/exclude,
+  # unless .gitignore already ignores it.
+  local pattern="$1" exclude
+  if git -C "$ROOT" check-ignore -q "${pattern%/}" 2>/dev/null; then
+    return 0
+  fi
+  exclude=$(git -C "$ROOT" rev-parse --git-path info/exclude 2>/dev/null) || return 1
+  case "$exclude" in
+    /*) ;;
+    *) exclude="$ROOT/$exclude" ;;
+  esac
+  mkdir -p "$(dirname "$exclude")" 2>/dev/null || return 1
+  [ -f "$exclude" ] || : > "$exclude"
+  if ! grep -qxF "$pattern" "$exclude" 2>/dev/null; then
+    printf '%s\n' "$pattern" >> "$exclude"
+  fi
+}
+
+exclude_ok() {
+  local exclude
+  if git -C "$ROOT" check-ignore -q ".claude/orchestrate-runs" 2>/dev/null; then
+    echo 1
+    return
+  fi
+  exclude=$(git -C "$ROOT" rev-parse --git-path info/exclude 2>/dev/null)
+  case "$exclude" in /*) ;; *) exclude="$ROOT/$exclude" ;; esac
+  if [ -f "$exclude" ] && grep -qxF ".claude/orchestrate-runs/" "$exclude" 2>/dev/null; then
+    echo 1
+  else
+    echo 0
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Subcommands
+# ---------------------------------------------------------------------------
+cmd_preflight() {
+  local script="$PLUGIN_ROOT/scripts/preflight.sh"
+  [ -f "$script" ] || die "preflight script missing: $script (this plugin install is incomplete)"
+  resolve_root
+  cd "$ROOT" || die "cannot cd to $ROOT"
+  if [ -x "$script" ]; then
+    exec "$script" "$@"
+  fi
+  exec sh "$script" "$@"
+}
+
+cmd_init() {
+  local branch="" cap="-" mode="DIRECT" run_id="" baseline current tmp preflight_out rc n
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --branch) branch="$2"; shift 2 ;;
+      --cap) cap="$2"; shift 2 ;;
+      --mode) mode="$2"; shift 2 ;;
+      --run) run_id="$2"; shift 2 ;;
+      *) die "init: unknown argument $1" ;;
+    esac
+  done
+  case "$mode" in FOREMAN|DIRECT) ;; *) die "init: --mode must be FOREMAN or DIRECT" ;; esac
+  resolve_root
+  [ -n "$run_id" ] || run_id="$OPT_RUN"
+  baseline=$(git -C "$ROOT" rev-parse HEAD 2>/dev/null) || die "init: repository has no commits yet"
+  current=$(git -C "$ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
+  if [ -n "$branch" ] && [ "$branch" != "$current" ]; then
+    if git -C "$ROOT" show-ref --verify --quiet "refs/heads/$branch"; then
+      git -C "$ROOT" checkout -q "$branch" || die "init: cannot check out $branch"
+    else
+      git -C "$ROOT" checkout -q -b "$branch" || die "init: cannot create $branch"
+    fi
+    current="$branch"
+  fi
+  mkdir -p "$RUNS_DIR" || die "init: cannot create $RUNS_DIR"
+  if [ -n "$run_id" ]; then
+    [ -e "$RUNS_DIR/$run_id" ] && die "init: run $run_id already exists at $RUNS_DIR/$run_id"
+  else
+    run_id=$(date +%Y%m%d-%H%M)
+    n=1
+    while [ -e "$RUNS_DIR/$run_id" ]; do
+      n=$((n + 1))
+      run_id="$(date +%Y%m%d-%H%M)-$n"
+    done
+  fi
+  tmp=$(mktemp -d "$RUNS_DIR/.init.XXXXXX") || die "init: mktemp failed"
+  trap 'rm -rf "$tmp"' EXIT
+  mkdir -p "$tmp/dispatch" "$tmp/reports" "$tmp/gates" "$tmp/failures" || die "init: cannot build archive"
+  preflight_out="$tmp/.preflight.txt"
+  if [ -f "$PLUGIN_ROOT/scripts/preflight.sh" ]; then
+    (cd "$ROOT" && sh "$PLUGIN_ROOT/scripts/preflight.sh" --json > "$preflight_out" 2>/dev/null) || true
+    # a preflight refusal (exit 2) still yields usable harness JSON; a missing script yields defaults
+  else
+    : > "$preflight_out"
+  fi
+  {
+    echo "# orchestrate run $run_id"
+    echo
+    echo "- created: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "- integration root: $ROOT"
+    echo "- integration branch: $current"
+    echo "- baseline: $baseline"
+    echo "- dispatch mode: $mode"
+    echo
+  } > "$tmp/dispatch-log.md"
+  py init-seed "$tmp/checkpoint.json" "$run_id" "$ROOT" "$current" "$baseline" "$mode" "$cap" "$preflight_out"
+  rc=$?
+  [ $rc -eq 0 ] || exit $rc
+  rm -f "$preflight_out"
+  exclude_add ".claude/orchestrate-runs/" || echo "orchestrate: warning: could not update .git/info/exclude" >&2
+  mv "$tmp" "$RUNS_DIR/$run_id" || die "init: cannot move archive into place"
+  trap - EXIT
+  echo "$RUNS_DIR/$run_id"
+  echo "$run_id"
+}
+
+cmd_plan() {
+  [ "${1:-}" = "set" ] || die "usage: orchestrate plan set <id> --tier .. --model .. --effort .. --verifier .."
+  shift
+  [ -n "${1:-}" ] || die "plan set: missing unit id"
+  resolve_run
+  locked_py plan-set "$CHECKPOINT" "$@"
+}
+
+cmd_unit() {
+  [ "${1:-}" = "set" ] || die "usage: orchestrate unit set <id> <status> [--sha] [--evidence] [--spot-check]"
+  shift
+  [ -n "${2:-}" ] || die "unit set: need <id> <status>"
+  case "$2" in pending|in-flight|integrated|failed|surfaced) ;; *) die "unit set: bad status $2" ;; esac
+  resolve_run
+  locked_py unit-set "$CHECKPOINT" "$@"
+}
+
+cmd_dispatch() {
+  local sub="${1:-}"
+  shift || true
+  resolve_run
+  case "$sub" in
+    open)
+      [ -n "${1:-}" ] || die "dispatch open: missing unit"
+      locked_py dispatch-open "$CHECKPOINT" "$@" ;;
+    close)
+      [ -n "${2:-}" ] || die "dispatch close: need <unit> <n>"
+      locked_py dispatch-close "$CHECKPOINT" "$@" ;;
+    *) die "usage: orchestrate dispatch open|close ..." ;;
+  esac
+}
+
+cmd_lease() {
+  local sub="${1:-}"
+  shift || true
+  resolve_run
+  case "$sub" in
+    take) locked_py lease-take "$CHECKPOINT" "$@" ;;
+    check) py lease-check "$CHECKPOINT" "$@" ;;
+    *) die "usage: orchestrate lease take|check ..." ;;
+  esac
+}
+
+cmd_stall() {
+  [ "${1:-}" = "record" ] || die "usage: orchestrate stall record"
+  resolve_run
+  locked_py stall-record "$CHECKPOINT"
+}
+
+run_bootstrap() {
+  # run_bootstrap <unit> <worktree>: manifest envBootstrap then install, logged to the archive.
+  local unit="$1" wt="$2" manifest cmd log rc key
+  manifest=$(manifest_path) || { echo "no manifest: skipping env bootstrap and install" >&2; return 0; }
+  log="$ARCHIVE/gates/$unit-bootstrap.log"
+  for key in envBootstrap install; do
+    cmd=$(py manifest-get "$manifest" "$key") || return 1
+    [ -n "$cmd" ] || continue
+    echo "=== $key: $cmd" >> "$log"
+    (cd "$wt" && bash -c "$cmd") < /dev/null >> "$log" 2>&1
+    rc=$?
+    echo "=== exit $rc" >> "$log"
+    if [ $rc -ne 0 ]; then
+      echo "orchestrate: $key failed in $wt (exit $rc) -> $log" >&2
+      return 1
+    fi
+    echo "$key: ok ($cmd)"
+  done
+}
+
+cmd_worktree() {
+  local sub="${1:-}" unit at="" branch="" path="" bootstrap=1 force=0 detach=0 existing rc
+  shift || true
+  resolve_run
+  case "$sub" in
+    add)
+      unit="${1:-}"; [ -n "$unit" ] || die "worktree add: missing unit"
+      shift
+      while [ $# -gt 0 ]; do
+        case "$1" in
+          --at) at="$2"; shift 2 ;;
+          --branch) branch="$2"; shift 2 ;;
+          --path) path="$2"; shift 2 ;;
+          --no-bootstrap) bootstrap=0; shift ;;
+          --detach) detach=1; shift ;;
+          *) die "worktree add: unknown argument $1" ;;
+        esac
+      done
+      [ -n "$at" ] || die "worktree add: --at <sha> is required (use the unit's exact baseline)"
+      [ $detach -eq 1 ] && [ -n "$branch" ] && die "worktree add: --detach and --branch are mutually exclusive"
+      [ $detach -eq 1 ] || [ -n "$branch" ] || branch="unit/$unit"
+      at=$(git -C "$ROOT" rev-parse --verify --quiet "$at^{commit}") || die "worktree add: $at is not a commit"
+      [ -n "$path" ] || path="$ROOT/.claude/worktrees/$unit"
+      case "$path" in /*) ;; *) path="$PWD/$path" ;; esac
+      [ -e "$path" ] && die "worktree add: $path already exists"
+      mkdir -p "$(dirname "$path")" || die "worktree add: cannot create $(dirname "$path")"
+      exclude_add ".claude/worktrees/" || true
+      if [ $detach -eq 1 ]; then
+        git -C "$ROOT" worktree add -q --detach "$path" "$at" || die "worktree add: git worktree add failed"
+      elif existing=$(git -C "$ROOT" rev-parse --verify --quiet "refs/heads/$branch"); then
+        [ "$existing" = "$at" ] || die "worktree add: branch $branch already exists at $existing, not at $at (pass --branch <other name>, or delete it)"
+        git -C "$ROOT" worktree add -q "$path" "$branch" || die "worktree add: git worktree add failed (is $branch checked out elsewhere?)"
+      else
+        git -C "$ROOT" worktree add -q -b "$branch" "$path" "$at" || die "worktree add: git worktree add failed"
+      fi
+      locked_py worktree-register "$CHECKPOINT" "$unit" "$path" "$branch" "$at" || exit 1
+      if [ $bootstrap -eq 1 ]; then
+        run_bootstrap "$unit" "$path" || { echo "$path${branch:+ $branch}"; exit 1; }
+      fi
+      echo "$path${branch:+ $branch}" ;;
+    remove)
+      unit="${1:-}"; [ -n "$unit" ] || die "worktree remove: missing unit"
+      shift
+      while [ $# -gt 0 ]; do
+        case "$1" in
+          --force) force=1; shift ;;
+          *) die "worktree remove: unknown argument $1" ;;
+        esac
+      done
+      path=$(py worktree-path "$CHECKPOINT" "$unit") || die "worktree remove: no open worktree registered for $unit"
+      if [ -d "$path" ]; then
+        # Untracked files (bootstrap artefacts, .env, node_modules) are always dropped;
+        # modified tracked files block removal unless --force is given.
+        if [ $force -eq 0 ] && [ -n "$(git -C "$path" status --porcelain --untracked-files=no 2>/dev/null)" ]; then
+          die "worktree remove: $path has uncommitted changes to tracked files (commit them or re-run with --force)"
+        fi
+        git -C "$ROOT" worktree remove --force "$path" || die "worktree remove: git worktree remove failed"
+      else
+        git -C "$ROOT" worktree prune 2>/dev/null || true
+      fi
+      locked_py worktree-deregister "$CHECKPOINT" "$unit" > /dev/null || exit 1
+      echo "removed $path" ;;
+    *) die "usage: orchestrate worktree add|remove ..." ;;
+  esac
+}
+
+cmd_gate() {
+  [ "${1:-}" = "run" ] || die "usage: orchestrate gate run <unit> unit|integration|ship [--cwd] [--cold] [--since]"
+  shift
+  local unit="${1:-}" stage="${2:-}" cwd="" cold=0 since="" manifest="" cmds tsv n log json rc start dur source errfile
+  local id optional cmd label failed=0 result
+  local argcmds=()
+  [ -n "$unit" ] && [ -n "$stage" ] || die "gate run: need <unit> <stage>"
+  shift 2
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --cwd) cwd="$2"; shift 2 ;;
+      --cold) cold=1; shift ;;
+      --since) since="$2"; shift 2 ;;
+      --cmd) [ -n "${2:-}" ] || die "gate run: --cmd needs <id>=<command>"; argcmds[${#argcmds[@]}]="$2"; shift 2 ;;
+      --cmd=*) argcmds[${#argcmds[@]}]="${1#--cmd=}"; shift ;;
+      *) die "gate run: unknown argument $1" ;;
+    esac
+  done
+  case "$stage" in unit|integration|ship) ;; *) die "gate run: stage must be unit, integration or ship" ;; esac
+  [ "$stage" = "ship" ] && cold=1
+  [ "$unit" = "-" ] && unit="all"
+  resolve_run
+  manifest=$(manifest_path) || manifest=""
+  [ -n "$cwd" ] || cwd="$ROOT"
+  [ -d "$cwd" ] || die "gate run: cwd $cwd does not exist"
+  [ -n "$since" ] || since=$(py get "$CHECKPOINT" baselineSha 2>/dev/null || echo "")
+  # command source, in order: --cmd options, the manifest stage, the unit's newest saved report gates[]
+  if [ ${#argcmds[@]} -gt 0 ]; then
+    source="--cmd"
+    cmds=$(py arg-cmds "$since" "${argcmds[@]}") || exit 1
+  elif [ -n "$manifest" ]; then
+    source="$manifest"
+    cmds=$(py manifest-cmds "$manifest" "$stage" "$since") || exit 1
+  else
+    errfile="$ARCHIVE/.report-cmds.$$"
+    if cmds=$(py report-cmds "$ARCHIVE/reports" "$unit" "$since" 2> "$errfile"); then
+      source=$(sed -n 's/^gate commands from //p' "$errfile" | head -1)
+      rm -f "$errfile"
+    elif [ -s "$errfile" ]; then
+      cat "$errfile" >&2          # a saved report exists but is unusable (no gates[], bad JSON)
+      rm -f "$errfile"
+      exit 1
+    else
+      rm -f "$errfile"
+      echo "no manifest (.claude/orchestrate-gates.json or orchestrate-gates.json under $ROOT) and no saved report reports/$unit-<n>.json: pass --cmd <id>=<command> (repeatable) or run 'orchestrate report save $unit <report>' first" >&2
+      exit 1
+    fi
+  fi
+  mkdir -p "$ARCHIVE/gates"
+  n=1
+  while [ -e "$ARCHIVE/gates/$unit-$stage-$n.json" ] || [ -e "$ARCHIVE/gates/$unit-$stage-$n.log" ]; do
+    n=$((n + 1))
+  done
+  log="$ARCHIVE/gates/$unit-$stage-$n.log"
+  json="$ARCHIVE/gates/$unit-$stage-$n.json"
+  tsv=$(mktemp "$ARCHIVE/gates/.results.XXXXXX") || die "gate run: mktemp failed"
+  {
+    echo "# gate run: unit $unit stage $stage cold $cold cwd $cwd at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "# commands from: $source"
+  } > "$log"
+  if [ $cold -eq 1 ]; then
+    if [ -n "$manifest" ]; then
+      py cache-clean "$manifest" "$cwd" | tee -a "$log"
+    else
+      echo "cold: no manifest, no cachePaths to delete" | tee -a "$log"
+    fi
+  fi
+  while IFS=$'\t' read -r id optional cmd; do
+    [ -n "$id" ] || continue
+    printf '\n=== %s: %s\n' "$id" "$cmd" >> "$log"
+    start=$(date +%s)
+    (cd "$cwd" && bash -c "$cmd") < /dev/null >> "$log" 2>&1
+    rc=$?
+    dur=$(( $(date +%s) - start ))
+    printf '=== exit %s (%ss)\n' "$rc" "$dur" >> "$log"
+    printf '%s\t%s\t%s\t%s\t%s\n' "$id" "$cmd" "$rc" "$dur" "$optional" >> "$tsv"
+    if [ $rc -eq 0 ]; then
+      label="PASS"
+    else
+      label="FAIL"
+      [ "$optional" = "1" ] || failed=1
+    fi
+    if [ "$optional" = "1" ] && [ $rc -ne 0 ]; then
+      printf '%s %s (%s → exit %s, %ss) → %s [optional: not counted]\n' "$label" "$id" "$cmd" "$rc" "$dur" "$log"
+    else
+      printf '%s %s (%s → exit %s, %ss) → %s\n' "$label" "$id" "$cmd" "$rc" "$dur" "$log"
+    fi
+  done <<EOF
+$cmds
+EOF
+  result=$(py gate-json "$json" "$stage" "$cold" "$unit" "$cwd" "$tsv") || { rm -f "$tsv"; exit 1; }
+  rm -f "$tsv"
+  echo "$stage gate: $result → $json"
+  [ "$result" = "PASS" ] || exit 3
+}
+
+cmd_report() {
+  local sub="${1:-}" unit file n dest
+  shift || true
+  case "$sub" in
+    validate)
+      [ -n "${1:-}" ] || die "report validate: missing file"
+      py report-check "$1" ;;
+    save)
+      unit="${1:-}"; file="${2:-}"
+      [ -n "$unit" ] && [ -n "$file" ] || die "report save: need <unit> <file>"
+      resolve_run
+      py report-check "$file" "$unit" || exit 1
+      mkdir -p "$ARCHIVE/reports"
+      take_lock
+      n=1
+      while [ -e "$ARCHIVE/reports/$unit-$n.json" ]; do n=$((n + 1)); done
+      dest="$ARCHIVE/reports/$unit-$n.json"
+      # re-parse under the lock and write the bare object (a fenced block is unwrapped)
+      py report-check "$file" "$unit" "$dest.tmp" > /dev/null && mv "$dest.tmp" "$dest" || { rm -f "$dest.tmp"; release_lock; die "report save: copy failed"; }
+      release_lock
+      echo "$dest" ;;
+    *) die "usage: orchestrate report validate <file> | save <unit> <file>" ;;
+  esac
+}
+
+cmd_archive() {
+  [ "${1:-}" = "check" ] || die "usage: orchestrate archive check"
+  resolve_run
+  py archive-check "$CHECKPOINT" "$ARCHIVE" "$(exclude_ok)"
+}
+
+cmd_status() {
+  resolve_run
+  py status "$CHECKPOINT"
+}
+
+cmd_cost() {
+  local manifest
+  resolve_run
+  manifest=$(manifest_path) || manifest="-"
+  py cost "$CHECKPOINT" "$manifest"
+}
+
+cmd_stale() {
+  local minutes=20 age
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --minutes) minutes="$2"; shift 2 ;;
+      *) die "stale: unknown argument $1" ;;
+    esac
+  done
+  case "$minutes" in ''|*[!0-9]*) die "stale: --minutes must be an integer" ;; esac
+  resolve_run
+  age=$(py age "$CHECKPOINT")
+  if [ "$age" -le $((minutes * 60)) ]; then
+    echo "fresh: checkpoint written ${age}s ago (window ${minutes} min)"
+    exit 0
+  fi
+  echo "stale: checkpoint written $((age / 60)) min ago (window ${minutes} min)"
+  exit 2
+}
+
+cmd_pause() {
+  resolve_run
+  locked_py pause "$CHECKPOINT" "$@"
+}
+
+cmd_resume() {
+  resolve_run
+  locked_py resume "$CHECKPOINT"
+}
+
+cmd_handoff() {
+  resolve_run
+  locked_py handoff "$CHECKPOINT" "$@"
+}
+
+cmd_next() {
+  [ "${1:-}" = "set" ] || die "usage: orchestrate next set <text>"
+  [ -n "${2:-}" ] || die "next set: missing text"
+  resolve_run
+  locked_py next-set "$CHECKPOINT" "$2"
+}
+
+cmd_harness() {
+  [ "${1:-}" = "set" ] || die "usage: orchestrate harness set dispatch foreground|background|foreground-on-request|unknown"
+  [ -n "${3:-}" ] || die "harness set: need <key> <value>"
+  resolve_run
+  locked_py harness-set "$CHECKPOINT" "$2" "$3"
+}
+
+# ---------------------------------------------------------------------------
+# Argument pre-scan for global options, then dispatch
+# ---------------------------------------------------------------------------
+main() {
+  local args=() sub
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --root) [ -n "${2:-}" ] || die "--root needs a path"; OPT_ROOT="$2"; shift 2 ;;
+      --root=*) OPT_ROOT="${1#--root=}"; shift ;;
+      --run) [ -n "${2:-}" ] || die "--run needs an id"; OPT_RUN="$2"; shift 2 ;;
+      --run=*) OPT_RUN="${1#--run=}"; shift ;;
+      *) args[${#args[@]}]="$1"; shift ;;
+    esac
+  done
+  command -v python3 > /dev/null 2>&1 || die "python3 is required"
+  command -v git > /dev/null 2>&1 || die "git is required"
+  [ -f "$CHECKPOINT_SCHEMA" ] || die "schema missing: $CHECKPOINT_SCHEMA"
+  [ -f "$REPORT_SCHEMA" ] || die "schema missing: $REPORT_SCHEMA"
+  [ -f "$MANIFEST_SCHEMA" ] || die "schema missing: $MANIFEST_SCHEMA"
+  set -- "${args[@]+"${args[@]}"}"
+  sub="${1:-help}"
+  shift || true
+  case "$sub" in
+    preflight) cmd_preflight "$@" ;;
+    init) cmd_init "$@" ;;
+    plan) cmd_plan "$@" ;;
+    unit) cmd_unit "$@" ;;
+    dispatch) cmd_dispatch "$@" ;;
+    lease) cmd_lease "$@" ;;
+    stall) cmd_stall "$@" ;;
+    worktree) cmd_worktree "$@" ;;
+    gate) cmd_gate "$@" ;;
+    report) cmd_report "$@" ;;
+    archive) cmd_archive "$@" ;;
+    status) cmd_status "$@" ;;
+    cost) cmd_cost "$@" ;;
+    stale) cmd_stale "$@" ;;
+    pause) cmd_pause "$@" ;;
+    resume) cmd_resume "$@" ;;
+    handoff) cmd_handoff "$@" ;;
+    next) cmd_next "$@" ;;
+    harness) cmd_harness "$@" ;;
+    complete) cmd_next set complete ;;
+    help|-h|--help) usage ;;
+    *) echo "orchestrate: unknown subcommand $sub" >&2; usage >&2; exit 1 ;;
+  esac
+}
+
+main "$@"

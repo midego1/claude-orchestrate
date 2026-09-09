@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/midego1/claude-orchestrate/schemas/worker-report.schema.json",
+  "title": "orchestrate worker report",
+  "description": "The final text of every worker is ONE fenced json block holding this object and nothing else. Gate 1 (the dispatcher) validates it with 'orchestrate report save'.",
+  "type": "object",
+  "required": ["unit", "branch", "baselineSha", "headSha", "commits", "filesChanged", "gates", "criteria", "deviations", "backgroundProcesses"],
+  "properties": {
+    "unit": { "type": "string", "minLength": 1 },
+    "branch": { "type": "string", "minLength": 1 },
+    "baselineSha": { "type": "string", "minLength": 1 },
+    "headSha": { "type": "string", "minLength": 1 },
+    "commits": { "type": "array", "items": { "type": "string" } },
+    "filesChanged": { "type": "array", "items": { "type": "string" } },
+    "gates": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "cmd", "exit"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "cmd": { "type": "string", "minLength": 1 },
+          "exit": { "type": "integer" }
+        }
+      }
+    },
+    "criteria": {
+      "type": "array",
+      "minItems": 1,
+      "description": "One entry per done-criterion of the dispatch contract (C1..Cn); a report that asserts nothing is invalid. gates may be empty for read-only units.",
+      "items": {
+        "type": "object",
+        "required": ["id", "status"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^C[0-9]+$" },
+          "status": { "type": "string", "enum": ["PASS", "FAIL", "EXECUTION-PENDING"] },
+          "evidence": { "type": "string" }
+        }
+      }
+    },
+    "deviations": { "type": "array", "items": { "type": "string" } },
+    "envVars": { "type": "array", "items": { "type": "string" } },
+    "pendingRuntimeChecks": { "type": "array", "items": { "type": "string" } },
+    "preExistingOnBase": { "type": "array", "items": { "type": "string" } },
+    "backgroundProcesses": { "type": "string", "const": "none" },
+    "notes": { "type": "string" }
+  }
+}
