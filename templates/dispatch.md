@@ -18,7 +18,7 @@ Sub-agents share nothing with the dispatcher or each other; over-include rather 
 - Files in scope: `<declared file scope>`. Changes outside it fail the diff-scope check.
 - Constraints and conventions: `<relevant paths, patterns to follow, things that must not change>`.
 - Related units running in parallel: `<ids and their file scopes, or none>`.
-- Shared docs: write docs fragments to `<fragments>/<unit>.md` (the manifest `docs[].fragments` directory, e.g. `docs/_pending`; first line = the title); never edit the target `<docs[].target>`; the dispatcher inserts the fragment with `orchestrate docs apply <unit>` at integration.
+- Shared docs: write docs fragments to `<fragments>/<unit>.md` (the manifest `docs[].fragments` directory, e.g. `docs/_pending`; create it with `mkdir -p` first, git does not keep empty directories; first line = the title); never edit the target `<docs[].target>`; the dispatcher inserts the fragment with `orchestrate docs apply <unit>` at integration.
 
 ## 3. Done-criteria (IDs C1..Cn; verifiers and `dispatch close --evidence` reuse them)
 
