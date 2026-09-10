@@ -633,6 +633,352 @@ else
   check_exit 1 "preflight without scripts/preflight.sh exits 1" "$ORCH" preflight
 fi
 
+# ---------------------------------------------------------------------------
+# v0.6.1: report save artifacts (P1), worktree sync (P2), docs apply (P3), push (P4)
+# ---------------------------------------------------------------------------
+echo "== v0.6.1 setup (run v061)"
+cd "$REPO"
+check_exit 0 "help lists worktree sync" "$ORCH" help
+check_contains "help: worktree sync" "worktree sync <unit>" "$LAST_OUT"
+check_contains "help: docs apply" "docs apply <unit>" "$LAST_OUT"
+check_contains "help: push" "push <unit> [--pr] [--no-wait]" "$LAST_OUT"
+check_contains "help: report save --run-criteria" "--run-criteria C1,C2" "$LAST_OUT"
+check_exit 0 "init --run v061" "$ORCH" init --run v061
+export ORCHESTRATE_RUN=v061
+VCP="$RUNS/v061/checkpoint.json"
+VLOG="$RUNS/v061/dispatch-log.md"
+for u in R1 R2 S1 D1 P1 P2; do "$ORCH" plan set $u --tier T1 --model sonnet --effort low --verifier fast > /dev/null || fail "plan set $u"; done
+unit_field() { python3 -c 'import json,sys; cp=json.load(open(sys.argv[1])); u=[x for x in cp["units"] if x["id"]==sys.argv[2]][0]; n=u
+for p in sys.argv[3].split("."): n=n[p]
+print(n if isinstance(n,str) else json.dumps(n))' "$VCP" "$1" "$2"; }
+wt_field() { python3 -c 'import json,sys; cp=json.load(open(sys.argv[1])); w=[x for x in cp["openWorktrees"] if x["unit"]==sys.argv[2]][0]; print(w.get(sys.argv[3],""))' "$VCP" "$1" "$2"; }
+
+# ---------------------------------------------------------------------------
+echo "== report save: [run] artifacts"
+check_exit 0 "worktree add R1" "$ORCH" worktree add R1 --at "$BASE" --no-bootstrap --path "$WORK/wt-R1"
+cat > "$WORK/report-run.json" <<EOF
+{
+  "unit": "R1", "branch": "unit/R1", "baselineSha": "$BASE", "headSha": "$BASE",
+  "commits": [], "filesChanged": ["README.md"],
+  "gates": [ { "id": "ok", "cmd": "echo unit-ok", "exit": 0 } ],
+  "criteria": [
+    { "id": "C1", "status": "PASS", "evidence": "18 scenarios, 18 passed, 0 failed; log at out/test.log", "artifact": "out/test.log", "runCmd": "npm test" },
+    { "id": "C2", "status": "PASS", "evidence": "reviewed" },
+    { "id": "C3", "status": "FAIL", "evidence": "flaky", "artifact": "out/missing.log", "runCmd": "npm run e2e" }
+  ],
+  "deviations": [], "backgroundProcesses": "none"
+}
+EOF
+check_exit 0 "report validate accepts artifact/runCmd fields" "$ORCH" report validate "$WORK/report-run.json"
+check_exit 1 "report save: PASS artifact missing under the registered worktree" "$ORCH" report save R1 "$WORK/report-run.json"
+check_contains "refusal names the criterion" "C1" "$LAST_OUT"
+check_contains "refusal says not found" "not found" "$LAST_OUT"
+check_true "nothing saved for R1" test ! -e "$RUNS/v061/reports/R1-1.json"
+mkdir -p "$WORK/wt-R1/out" && : > "$WORK/wt-R1/out/test.log"
+check_exit 1 "report save: empty artifact refused" "$ORCH" report save R1 "$WORK/report-run.json"
+check_contains "refusal says empty" "empty" "$LAST_OUT"
+printf '18 scenarios\n18 passed\n0 failed\n' > "$WORK/wt-R1/out/test.log"
+check_exit 0 "report save: artifact present and non-empty" "$ORCH" report save R1 "$WORK/report-run.json"
+check_contains "artifacts line printed" "artifacts: 1 file(s) copied" "$LAST_OUT"
+check_true "path printed last" test "$(printf '%s\n' "$LAST_OUT" | tail -1)" = "$RUNS/v061/reports/R1-1.json"
+check_true "saved reports/R1-1.json" test -f "$RUNS/v061/reports/R1-1.json"
+check_true "artifact copied under reports/R1-1-artifacts/" test -f "$RUNS/v061/reports/R1-1-artifacts/out/test.log"
+check_true "copied artifact has the run output" grep -q "18 passed" "$RUNS/v061/reports/R1-1-artifacts/out/test.log"
+check_true "FAIL criterion's missing artifact is not copied (and not required)" test ! -e "$RUNS/v061/reports/R1-1-artifacts/out/missing.log"
+check_exit 1 "--run-criteria C2: PASS without artifact refused" "$ORCH" report save R1 "$WORK/report-run.json" --run-criteria C2
+check_contains "names C2" "C2" "$LAST_OUT"
+check_contains "explains the [run] contract" "artifact + runCmd" "$LAST_OUT"
+check_true "refused save left no R1-2" test ! -e "$RUNS/v061/reports/R1-2.json"
+check_exit 0 "--run-criteria C1: artifact + runCmd present" "$ORCH" report save R1 "$WORK/report-run.json" --run-criteria C1
+check_true "saved reports/R1-2.json with artifacts dir" test -f "$RUNS/v061/reports/R1-2.json" -a -f "$RUNS/v061/reports/R1-2-artifacts/out/test.log"
+check_exit 1 "--run-criteria C9: unknown criterion refused" "$ORCH" report save R1 "$WORK/report-run.json" --run-criteria C9
+python3 - "$WORK/report-run.json" "$WORK/report-norun.json" "$WORK/report-abs.json" <<'PY'
+import json, sys
+ok = json.load(open(sys.argv[1]))
+d = json.loads(json.dumps(ok)); del d["criteria"][0]["runCmd"]; json.dump(d, open(sys.argv[2], "w"))
+a = json.loads(json.dumps(ok)); a["criteria"][0]["artifact"] = "/etc/hosts"; json.dump(a, open(sys.argv[3], "w"))
+PY
+check_exit 1 "--run-criteria C1 without runCmd refused" "$ORCH" report save R1 "$WORK/report-norun.json" --run-criteria C1
+check_contains "names runCmd" "runCmd" "$LAST_OUT"
+check_exit 0 "artifact without runCmd is fine when not listed as [run]" "$ORCH" report save R1 "$WORK/report-norun.json"
+check_exit 1 "absolute artifact path refused" "$ORCH" report save R1 "$WORK/report-abs.json"
+check_contains "says repo-relative" "repo-relative" "$LAST_OUT"
+mkdir -p "$WORK/other-wt"
+check_exit 1 "--worktree <dir> without the artifact refused" "$ORCH" report save R1 "$WORK/report-run.json" --worktree "$WORK/other-wt"
+sed 's/"unit": "R1"/"unit": "R2"/; s#unit/R1#unit/R2#' "$WORK/report-run.json" > "$WORK/report-run-R2.json"
+check_exit 1 "unit without a worktree: artifact looked up in the cwd (absent here)" "$ORCH" report save R2 "$WORK/report-run-R2.json"
+cd "$WORK/wt-R1"
+check_exit 0 "unit without a worktree: artifact found in the cwd (--root names the integration root)" "$ORCH" --root "$REPO" report save R2 "$WORK/report-run-R2.json"
+check_true "R2 artifact copied" test -f "$RUNS/v061/reports/R2-1-artifacts/out/test.log"
+cd "$REPO"
+
+# ---------------------------------------------------------------------------
+echo "== worktree sync"
+check_exit 1 "worktree sync unknown unit" "$ORCH" worktree sync S9
+check_exit 0 "worktree add S1 (bootstrapped)" "$ORCH" worktree add S1 --at "$BASE" --path "$WORK/wt-S1"
+WTS="$WORK/wt-S1"
+check_true "S1 bootstrap ran once" test "$(grep -c env "$WTS/bootstrap.txt")" = 1 -a "$(grep -c install "$WTS/bootstrap.txt")" = 1
+echo "main change 1" > main-note.txt && git add main-note.txt && git commit -q -m "main: note"
+MAIN1=$(git rev-parse HEAD)
+check_exit 0 "worktree sync S1: no lockfile change" "$ORCH" worktree sync S1
+check_true "prints <wt> merged <sha> install:skipped gates:skipped" test "$(printf '%s\n' "$LAST_OUT" | tail -1)" = "$WTS merged $MAIN1 install:skipped gates:skipped"
+check_true "worktree contains the integration tip" git -C "$WTS" merge-base --is-ancestor "$MAIN1" HEAD
+check_true "envBootstrap re-ran, install skipped" test "$(grep -c env "$WTS/bootstrap.txt")" = 2 -a "$(grep -c install "$WTS/bootstrap.txt")" = 1
+check_true "syncedTo recorded" test "$(wt_field S1 syncedTo)" = "$MAIN1"
+check_true "syncedAt recorded" test -n "$(wt_field S1 syncedAt)"
+check_true "dispatch-log has the sync line" grep -q "worktree sync S1: merged main@$MAIN1" "$VLOG"
+check_exit 0 "archive check accepts syncedAt/syncedTo" "$ORCH" archive check
+echo '{"lockfileVersion": 3}' > package-lock.json && git add package-lock.json && git commit -q -m "main: lockfile"
+MAIN2=$(git rev-parse HEAD)
+check_exit 0 "worktree sync S1 --gate: lockfile changed" "$ORCH" worktree sync S1 --gate
+check_contains "install ran, gates PASS" "$WTS merged $MAIN2 install:ran gates:PASS" "$LAST_OUT"
+check_contains "gate output shown" "PASS ok (echo unit-ok" "$LAST_OUT"
+check_true "install re-ran after the lockfile change" test "$(grep -c install "$WTS/bootstrap.txt")" = 2
+check_true "gate run recorded under gates/" test -f "$RUNS/v061/gates/S1-unit-1.json"
+check_true "syncedTo bumped" test "$(wt_field S1 syncedTo)" = "$MAIN2"
+check_exit 0 "worktree sync S1 --force-install without changes" "$ORCH" worktree sync S1 --force-install
+check_contains "forced install ran" "install:ran gates:skipped" "$LAST_OUT"
+check_true "install count 3" test "$(grep -c install "$WTS/bootstrap.txt")" = 3
+echo '{"lockfileVersion": 3, "x": 1}' > package-lock.json && git add package-lock.json && git commit -q -m "main: lockfile 2"
+check_exit 0 "worktree sync S1 --no-bootstrap" "$ORCH" worktree sync S1 --no-bootstrap
+check_contains "--no-bootstrap skips install even with a lockfile change" "install:skipped" "$LAST_OUT"
+check_true "no bootstrap ran (env 4, install 3 as before)" test "$(grep -c env "$WTS/bootstrap.txt")" = 4 -a "$(grep -c install "$WTS/bootstrap.txt")" = 3
+# conflict: both sides edit the first line of README.md
+echo "unit side" > "$WTS/README.md" && git -C "$WTS" commit -q -am "S1: readme"
+S1HEAD=$(git -C "$WTS" rev-parse HEAD)
+echo "main side" > README.md && git commit -q -am "main: readme"
+check_exit 3 "worktree sync S1: conflict exits 3" "$ORCH" worktree sync S1
+check_contains "conflict names the file" "conflict: README.md" "$LAST_OUT"
+check_true "merge aborted: HEAD unchanged" test "$(git -C "$WTS" rev-parse HEAD)" = "$S1HEAD"
+check_true "no merge in progress" test ! -e "$(git -C "$WTS" rev-parse --git-path MERGE_HEAD)"
+check_true "worktree clean after the abort" test -z "$(git -C "$WTS" status --porcelain --untracked-files=no)"
+check_true "conflict did not touch bootstrap" test "$(grep -c env "$WTS/bootstrap.txt")" = 4 -a "$(grep -c install "$WTS/bootstrap.txt")" = 3
+git checkout -q "$MAIN2" -- README.md 2>/dev/null; echo "unit side" > README.md && git commit -q -am "main: take the unit side"
+mv "$REPO/.claude/orchestrate-gates.json" "$REPO/.claude/orchestrate-gates.json.off"
+cat > "$REPO/.claude/orchestrate-gates.json" <<'EOF'
+{ "install": "echo install >> bootstrap.txt", "envBootstrap": "echo env >> bootstrap.txt",
+  "gates": { "unit": [ { "id": "bad", "cmd": "echo sync-gate-fails; exit 9" } ] } }
+EOF
+check_exit 3 "worktree sync S1 --gate: gate FAIL exits 3" "$ORCH" worktree sync S1 --gate
+check_contains "summary says gates:FAIL" "install:skipped gates:FAIL" "$LAST_OUT"
+mv "$REPO/.claude/orchestrate-gates.json.off" "$REPO/.claude/orchestrate-gates.json"
+
+# ---------------------------------------------------------------------------
+echo "== docs apply"
+mkdir -p docs/_pending docs/_e2e
+cat > docs/features.md <<'EOF'
+# Features
+
+## Changes
+
+- existing bullet
+
+```
+## not a heading (inside a fence)
+```
+
+## Other
+
+other text
+EOF
+cat > docs/e2e.md <<'EOF'
+# E2E
+
+## Scenarios
+
+- login
+EOF
+git add docs && git commit -q -m "docs targets"
+printf '# Login flow\n\nAdded login.\n\n- bullet one\n- bullet two\n' > docs/_pending/D1.md
+printf '# Extra\n\nmore\n' > docs/_pending/D1-extra.md
+printf '# Login scenarios\n\n- login happy path\n- login lockout\n' > docs/_e2e/D1.md
+mv "$REPO/.claude/orchestrate-gates.json" "$REPO/.claude/orchestrate-gates.json.off"
+check_exit 1 "docs apply without a manifest exits 1" "$ORCH" docs apply D1
+check_contains "names the missing manifest" "no manifest" "$LAST_OUT"
+mv "$REPO/.claude/orchestrate-gates.json.off" "$REPO/.claude/orchestrate-gates.json"
+python3 - "$REPO/.claude/orchestrate-gates.json" <<'PY'
+import json, sys
+m = json.load(open(sys.argv[1]))
+m["docs"] = [
+  {"fragments": "docs/_pending", "target": "docs/features.md", "section": "## Changes"},
+  {"fragments": "docs/_e2e", "target": "docs/e2e.md", "section": "## Scenarios"},
+]
+json.dump(m, open(sys.argv[1], "w"), indent=2)
+PY
+check_exit 0 "manifest with docs validates" schema_validate "$PLUGIN_ROOT/schemas/gates-manifest.schema.json" "$REPO/.claude/orchestrate-gates.json"
+SUM_BEFORE=$(cat docs/features.md docs/e2e.md | cksum)
+check_exit 0 "docs apply D1 --dry-run" "$ORCH" docs apply D1 --dry-run
+check_contains "dry run shows the diff" "+### D1: Login flow" "$LAST_OUT"
+check_contains "dry run summary (2 features + 1 e2e fragments)" "3 inserted, 0 skipped (dry run" "$LAST_OUT"
+check_true "dry run wrote nothing" test "$(cat docs/features.md docs/e2e.md | cksum)" = "$SUM_BEFORE"
+check_true "dry run kept the fragments" test -f docs/_pending/D1.md -a -f docs/_pending/D1-extra.md -a -f docs/_e2e/D1.md
+check_true "dry run wrote no log line" test "$(grep -c 'docs apply D1' "$VLOG")" = 0
+check_exit 0 "docs apply D1" "$ORCH" docs apply D1
+check_contains "apply summary" "docs apply D1: 3 inserted, 0 skipped" "$LAST_OUT"
+check_true "fragments deleted" test ! -e docs/_pending/D1.md -a ! -e docs/_pending/D1-extra.md -a ! -e docs/_e2e/D1.md
+check_true "features.md: both fragments inserted in order at the end of ## Changes, before ## Other" python3 - docs/features.md <<'PY'
+import sys
+t = open(sys.argv[1]).read()
+i = [t.index(x) for x in ("- existing bullet", "## not a heading", "### D1: Login flow", "- bullet two", "### D1: Extra", "more", "## Other")]
+assert i == sorted(i), i
+assert "### D1: Login flow\n\nAdded login.\n\n- bullet one\n- bullet two\n\n### D1: Extra\n\nmore\n\n## Other" in t, t
+PY
+check_true "e2e.md: inserted at EOF with a single trailing newline" python3 - docs/e2e.md <<'PY'
+import sys
+t = open(sys.argv[1]).read()
+assert t.endswith("- login\n\n### D1: Login scenarios\n\n- login happy path\n- login lockout\n"), repr(t)
+assert not t.endswith("\n\n")
+PY
+check_true "dispatch-log has the docs line" grep -q "docs apply D1 in $REPO: docs apply D1: 3 inserted" "$VLOG"
+SUM_AFTER=$(cat docs/features.md docs/e2e.md | cksum)
+printf '# Login flow\n\nAdded login again.\n' > docs/_pending/D1.md
+check_exit 0 "docs apply D1 again (idempotent)" "$ORCH" docs apply D1
+check_contains "second run skipped" "already has ### D1:" "$LAST_OUT"
+check_contains "summary counts the skip" "0 inserted, 1 skipped" "$LAST_OUT"
+check_true "targets unchanged on the second run" test "$(cat docs/features.md docs/e2e.md | cksum)" = "$SUM_AFTER"
+check_true "skipped fragment left in place" test -f docs/_pending/D1.md
+rm -f docs/_pending/D1.md
+check_exit 0 "docs apply D2: no fragment" "$ORCH" docs apply D2
+check_contains "no-fragment notice" "no fragment docs/_pending/D2.md" "$LAST_OUT"
+printf '# Bad\n\ntext\n\n## Splits the section\n' > docs/_pending/D2.md
+check_exit 1 "fragment with a heading at the section level refused" "$ORCH" docs apply D2
+check_contains "names the heading" "## Splits the section" "$LAST_OUT"
+check_true "refused fragment kept" test -f docs/_pending/D2.md
+rm -f docs/_pending/D2.md
+python3 - "$REPO/.claude/orchestrate-gates.json" <<'PY'
+import json, sys
+m = json.load(open(sys.argv[1])); m["docs"][0]["section"] = "## Missing"; json.dump(m, open(sys.argv[1], "w"), indent=2)
+PY
+printf '# X\n\nx\n' > docs/_pending/D2.md
+check_exit 1 "missing section exits 1" "$ORCH" docs apply D2
+check_contains "names the section and target" 'section "## Missing" not found in docs/features.md' "$LAST_OUT"
+check_true "missing section: fragment kept, target unchanged" test -f docs/_pending/D2.md -a "$(cat docs/features.md docs/e2e.md | cksum)" = "$SUM_AFTER"
+rm -f docs/_pending/D2.md
+python3 - "$REPO/.claude/orchestrate-gates.json" <<'PY'
+import json, sys
+m = json.load(open(sys.argv[1])); del m["docs"]; json.dump(m, open(sys.argv[1], "w"), indent=2)
+PY
+check_exit 0 "docs apply with no docs entries: notice, exit 0" "$ORCH" docs apply D1
+check_contains "no-entries notice" "no docs entries" "$LAST_OUT"
+python3 - "$REPO/.claude/orchestrate-gates.json" <<'PY'
+import json, sys
+m = json.load(open(sys.argv[1])); m["docs"] = [{"fragments": "docs/_pending", "target": "docs/features.md", "section": "## Changes"}]; json.dump(m, open(sys.argv[1], "w"), indent=2)
+PY
+mkdir -p "$WORK/int-wt" && git worktree add -q "$WORK/int-wt" -b integration-copy HEAD
+mkdir -p "$WORK/int-wt/docs/_pending" && printf '# From cwd\n\nbody\n' > "$WORK/int-wt/docs/_pending/D1.md"
+check_exit 0 "docs apply --cwd <integration worktree>" "$ORCH" docs apply D1 --cwd "$WORK/int-wt"
+check_true "--cwd target updated" grep -q "### D1: From cwd" "$WORK/int-wt/docs/features.md"
+check_true "--cwd left the root checkout alone" test "$(cat docs/features.md docs/e2e.md | cksum)" = "$SUM_AFTER"
+git worktree remove --force "$WORK/int-wt"
+# a "###" section gets a "####" unit heading (one level below the section), never a "###" that would split it (Codex P2, v0.6.1)
+printf '# Deep\n\n## Area\n\n### Notes\n\nkeep\n\n### Later\n\nlater\n' > docs/deep.md
+python3 - "$REPO/.claude/orchestrate-gates.json" <<'PY'
+import json, sys
+m = json.load(open(sys.argv[1])); m["docs"] = [{"fragments": "docs/_pending", "target": "docs/deep.md", "section": "### Notes"}]; json.dump(m, open(sys.argv[1], "w"), indent=2)
+PY
+printf '# Deep note\n\ndeep body\n' > docs/_pending/D1.md
+check_exit 0 "docs apply into a ### section" "$ORCH" docs apply D1
+check_true "unit heading is one level below (####)" grep -q "^#### D1: Deep note" docs/deep.md
+check_true "### Later section still follows the insert" python3 - docs/deep.md <<'PY'
+import sys
+t = open(sys.argv[1]).read()
+assert t.index("#### D1: Deep note") < t.index("### Later"), t
+assert "deep body" in t
+PY
+
+# ---------------------------------------------------------------------------
+echo "== push"
+git init -q --bare "$WORK/origin.git"
+git remote add origin "$WORK/origin.git"
+mkdir -p "$WORK/bin"
+cat > "$WORK/bin/gh" <<'EOF'
+#!/usr/bin/env bash
+# stub gh: records its arguments; behaviour per env (GH_PR_EXISTS: pr view exit, GH_CHECKS_EXIT: pr checks exit)
+printf '%s\n' "$*" >> "${GH_LOG:?}"
+last=""; for last; do :; done
+case "${1:-} ${2:-}" in
+  "pr view") exit "${GH_PR_EXISTS:-1}" ;;
+  "pr create") echo "https://example.invalid/pull/1"; exit 0 ;;
+  "pr checks") echo "stub checks for $last"; sleep "${GH_CHECKS_SLEEP:-0}"; exit "${GH_CHECKS_EXIT:-0}" ;;
+esac
+exit 0
+EOF
+chmod +x "$WORK/bin/gh"
+export GH_LOG="$WORK/gh.log"; : > "$GH_LOG"
+check_exit 0 "worktree add P1" "$ORCH" worktree add P1 --at "$BASE" --no-bootstrap --path "$WORK/wt-P1"
+check_exit 0 "worktree add P2" "$ORCH" worktree add P2 --at "$BASE" --no-bootstrap --path "$WORK/wt-P2"
+echo "p1" > "$WORK/wt-P1/p1.txt" && git -C "$WORK/wt-P1" add p1.txt && git -C "$WORK/wt-P1" commit -q -m "P1 work"
+echo "p2" > "$WORK/wt-P2/p2.txt" && git -C "$WORK/wt-P2" add p2.txt && git -C "$WORK/wt-P2" commit -q -m "P2 work"
+check_exit 1 "push unknown unit" "$ORCH" push P9
+check_exit 0 "push P1 without ci in the manifest (no gh needed)" env ORCHESTRATE_GH=/nonexistent/gh "$ORCH" push P1
+check_contains "prints branch pushed, checks skipped" "unit/P1 pushed pr:none checks:skipped" "$LAST_OUT"
+check_true "origin has unit/P1" git -C "$WORK/origin.git" rev-parse --verify --quiet refs/heads/unit/P1
+check_true "push recorded on the unit" test "$(unit_field P1 push.branch)" = "unit/P1" -a "$(unit_field P1 push.checks)" = "skipped" -a -n "$(unit_field P1 push.at)"
+check_exit 0 "archive check accepts the push record" "$ORCH" archive check
+check_exit 1 "push --pr without gh" env ORCHESTRATE_GH=/nonexistent/gh "$ORCH" push P1 --pr
+python3 - "$REPO/.claude/orchestrate-gates.json" <<'PY'
+import json, sys
+m = json.load(open(sys.argv[1])); m["ci"] = {"serial": True, "checksCmd": "gh pr checks --watch --fail-fast"}; json.dump(m, open(sys.argv[1], "w"), indent=2)
+PY
+check_exit 0 "manifest with ci validates" schema_validate "$PLUGIN_ROOT/schemas/gates-manifest.schema.json" "$REPO/.claude/orchestrate-gates.json"
+check_exit 2 "ci.serial without gh: refused (exit 2)" env ORCHESTRATE_GH=/nonexistent/gh "$ORCH" push P2 --pr
+check_contains "refusal explains" "ci.serial" "$LAST_OUT"
+check_true "refused push did not push" test -z "$(git -C "$WORK/origin.git" rev-parse --verify --quiet refs/heads/unit/P2)"
+check_exit 0 "push P2 --pr under ci.serial (stub gh on PATH)" env PATH="$WORK/bin:$PATH" "$ORCH" push P2 --pr
+check_contains "pr created, checks pass" "unit/P2 pushed pr:created checks:pass" "$LAST_OUT"
+check_contains "PR url printed" "https://example.invalid/pull/1" "$LAST_OUT"
+check_true "origin has unit/P2" git -C "$WORK/origin.git" rev-parse --verify --quiet refs/heads/unit/P2
+check_true "gh pr create --fill --base main" grep -q "^pr create --fill --base main" "$GH_LOG"
+check_true "checksCmd ran on the branch" grep -q "^pr checks --watch --fail-fast unit/P2$" "$GH_LOG"
+check_true "push.checks pass, pr recorded" test "$(unit_field P2 push.checks)" = "pass" -a "$(unit_field P2 push.pr)" = "https://example.invalid/pull/1"
+check_true "checks log written" grep -q "stub checks for unit/P2" "$RUNS/v061/gates/P2-checks.log"
+check_true "dispatch-log has the push line" grep -q "push P2: unit/P2 pushed to origin, pr:created" "$VLOG"
+check_exit 0 "push P2 --pr again: existing PR is reused" env PATH="$WORK/bin:$PATH" GH_PR_EXISTS=0 "$ORCH" push P2 --pr
+check_contains "pr existing" "pr:existing checks:pass" "$LAST_OUT"
+check_true "no second pr create" test "$(grep -c "^pr create" "$GH_LOG")" = 1
+check_exit 3 "push P2: failing checks exit 3" env PATH="$WORK/bin:$PATH" GH_CHECKS_EXIT=1 "$ORCH" push P2
+check_contains "checks fail printed" "checks:fail" "$LAST_OUT"
+check_true "push.checks fail" test "$(unit_field P2 push.checks)" = "fail"
+python3 - "$VCP" <<'PY'
+import json, sys
+cp = json.load(open(sys.argv[1]))
+for u in cp["units"]:
+    if u["id"] == "P2": u["push"]["checks"] = "running"
+json.dump(cp, open(sys.argv[1], "w"))
+PY
+check_exit 2 "push P1 while P2 checks are running: refused" env PATH="$WORK/bin:$PATH" "$ORCH" push P1 --pr
+check_contains "refusal names the running unit" "unit P2" "$LAST_OUT"
+check_true "P1 record untouched" test "$(unit_field P1 push.checks)" = "skipped"
+check_exit 0 "push P2 --no-wait re-pushes the running unit itself" env PATH="$WORK/bin:$PATH" "$ORCH" push P2 --no-wait
+check_contains "no-wait records pending" "checks:pending" "$LAST_OUT"
+check_true "push.checks pending" test "$(unit_field P2 push.checks)" = "pending"
+check_exit 0 "push P1 --pr --no-wait once P2 is no longer running" env PATH="$WORK/bin:$PATH" "$ORCH" push P1 --pr --no-wait
+check_contains "P1 pr created, pending" "unit/P1 pushed pr:created checks:pending" "$LAST_OUT"
+python3 - "$REPO/.claude/orchestrate-gates.json" <<'PY'
+import json, sys
+m = json.load(open(sys.argv[1])); m["ci"] = {"serial": True}; json.dump(m, open(sys.argv[1], "w"), indent=2)
+PY
+# atomic claim: a second push must be refused while the first one is still watching its checks (Codex P1, v0.6.1)
+( env PATH="$WORK/bin:$PATH" GH_CHECKS_SLEEP=4 "$ORCH" push P2 > "$WORK/push-bg.out" 2>&1 ) &
+_bg=$!
+sleep 1.5
+check_exit 2 "concurrent push P1 while P2's watch is live: refused (claim is atomic)" env PATH="$WORK/bin:$PATH" "$ORCH" push P1
+check_true "P1 not pushed by the refused call" test "$(unit_field P1 push.checks)" = "pending"
+wait $_bg
+check_true "background push P2 finished with checks pass" grep -q "checks:pass" "$WORK/push-bg.out"
+check_true "P2 recorded pass after the watch" test "$(unit_field P2 push.checks)" = "pass"
+check_exit 0 "push P1 with the default checksCmd" env PATH="$WORK/bin:$PATH" "$ORCH" push P1
+check_true "default checksCmd is gh pr checks --watch <branch>" grep -q "^pr checks --watch unit/P1$" "$GH_LOG"
+check_true "push.checks pass" test "$(unit_field P1 push.checks)" = "pass"
+python3 - "$REPO/.claude/orchestrate-gates.json" <<'PY'
+import json, sys
+m = json.load(open(sys.argv[1])); m["ci"] = {"serial": False}; json.dump(m, open(sys.argv[1], "w"), indent=2)
+PY
+check_exit 0 "ci.serial false: push without gh, checks skipped" env ORCHESTRATE_GH=/nonexistent/gh "$ORCH" push P1
+check_contains "serial false skips checks" "checks:skipped" "$LAST_OUT"
+check_exit 0 "archive check after the v0.6.1 round" "$ORCH" archive check
+unset ORCHESTRATE_RUN GH_LOG
+
 echo
 echo "== summary: $PASS_COUNT passed, $FAIL_COUNT failed"
 [ "$FAIL_COUNT" -eq 0 ]

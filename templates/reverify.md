@@ -26,10 +26,10 @@ Every field is required. The verifier returns `INPUT-MISSING — <field>` and `V
 
 ## Criteria in scope (IDs and text exactly as in `dispatch/<unit>.md`)
 
-- C2: <criterion text> · prior verdict: FAIL · <one line: what the prior verdict found> · settling evidence: <...>
+- C2 [run]: <criterion text> · prior verdict: FAIL · <one line: what the prior verdict found> · settling evidence: artifact `<archive>/reports/<unit>-<n>-artifacts/<file>` produced by `<runCmd from the fix-round report>`; judged from that file, never from the test source
 - C4: <criterion text> · prior verdict: FAIL · <...> · settling evidence: <...>
 
-Criteria not listed here PASSed at `<lastPassedSha>` and are out of scope.
+Criteria not listed here PASSed at `<lastPassedSha>` and are out of scope. A `[run]` criterion is judged from the fix round's run artifact (copied by `report save` to `<archive>/reports/<unit>-<n>-artifacts/`); a PASS without an artifact is FAIL with `evidence: no run artifact`.
 
 ## Instructions
 
@@ -51,7 +51,7 @@ git -C <repoRoot> merge-base --is-ancestor <baselineSha> <headSha>
 3. One line per criterion in scope, carrying its ID. Read `priorVerdictRef` only to learn what was open. `verifier-deep` also returns `MISSING` lines, limited to defects in or caused by the scoped range.
 4. Last line: `VERDICT: PASS|FAIL`.
 
-Rules: you are read-only; the worker report is a claim, never evidence; a verdict without cited evidence is a FAIL; evaluate only files inside the scoped `diffRange` unless the criterion names the file; a criterion not checkable from the material given is FAIL with `evidence: not checkable from provided material`; no narration.
+Rules: you are read-only; the worker report is a claim, never evidence; a verdict without cited evidence is a FAIL; evaluate only files inside the scoped `diffRange` unless the criterion names the file; a criterion not checkable from the material given is FAIL with `evidence: not checkable from provided material`; a `[run]` criterion without a run artifact is FAIL with `evidence: no run artifact`; no narration.
 
 ## Output format
 

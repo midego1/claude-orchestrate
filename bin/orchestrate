@@ -769,11 +769,71 @@ def load_report(path):
     except ValueError as e:
         die("report is not valid JSON (a bare object or one fenced json block is expected): %s: %s" % (path, e))
 
+def artifact_abspath(wt, art):
+    """Resolve a repo-relative artifact path under the worktree; (path, None) or (None, reason)."""
+    if not isinstance(art, str) or not art.strip():
+        return None, "artifact must be a non-empty string"
+    if os.path.isabs(art):
+        return None, "artifact %s must be repo-relative" % json.dumps(art)
+    root = os.path.realpath(wt)
+    full = os.path.realpath(os.path.join(root, art))
+    if full != root and not full.startswith(root + os.sep):
+        return None, "artifact %s escapes the worktree" % json.dumps(art)
+    return full, None
+
+def check_run_artifacts(doc, wt, run_ids):
+    """P1: a PASS criterion that is listed in --run-criteria or carries `artifact` needs a non-empty
+    artifact file under the worktree (a listed one needs runCmd too). Returns the artifacts to copy:
+    [(relative path, absolute path)] for every criterion whose artifact file exists."""
+    crits = [c for c in doc.get("criteria", []) if isinstance(c, dict)]
+    ids = set(c.get("id") for c in crits)
+    for cid in run_ids:
+        if cid not in ids:
+            print("INVALID: --run-criteria %s is not a criterion of the report" % cid)
+            sys.exit(1)
+    to_copy, seen = [], set()
+    for c in crits:
+        cid, art, listed = c.get("id"), c.get("artifact"), c.get("id") in run_ids
+        if c.get("status") == "PASS" and (listed or art):
+            if not art:
+                print("INVALID: criterion %s is PASS without artifact (a [run] criterion needs artifact + runCmd, or EXECUTION-PENDING)" % cid)
+                sys.exit(1)
+            if listed and not c.get("runCmd"):
+                print("INVALID: criterion %s is PASS without runCmd (a [run] criterion needs artifact + runCmd)" % cid)
+                sys.exit(1)
+            full, why = artifact_abspath(wt, art)
+            if full is None:
+                print("INVALID: criterion %s: %s" % (cid, why))
+                sys.exit(1)
+            if not os.path.isfile(full):
+                print("INVALID: criterion %s: artifact %s not found under %s (the run never happened, or the path is wrong)" % (cid, art, wt))
+                sys.exit(1)
+            if os.path.getsize(full) == 0:
+                print("INVALID: criterion %s: artifact %s is empty (no run output)" % (cid, art))
+                sys.exit(1)
+        if art:
+            full, why = artifact_abspath(wt, art)
+            if full and os.path.isfile(full) and art not in seen:
+                seen.add(art)
+                to_copy.append((art, full))
+    return to_copy
+
+def copy_artifacts(items, dest_dir):
+    n = 0
+    for rel, full in items:
+        dest = os.path.join(dest_dir, rel)
+        os.makedirs(os.path.dirname(dest) or dest_dir, exist_ok=True)
+        shutil.copy2(full, dest)
+        n += 1
+    return n
+
 def op_report_check(args):
-    # report-check <file> [unit|-] [out]: validate; with <out>, write the normalized JSON there
-    path = args[0]
-    want_unit = args[1] if len(args) > 1 and args[1] != "-" else None
-    out = args[2] if len(args) > 2 else None
+    # report-check <file> [unit|-] [out] [--worktree <dir>] [--run-criteria C1,C2] [--artifacts-dir <dir>]:
+    # validate; with <out>, write the normalized JSON there and copy run artifacts to --artifacts-dir
+    opts, pos = parse_opts(args, {"--worktree": "v", "--run-criteria": "v", "--artifacts-dir": "v"})
+    path = pos[0]
+    want_unit = pos[1] if len(pos) > 1 and pos[1] != "-" else None
+    out = pos[2] if len(pos) > 2 else None
     doc = load_report(path)
     errs = validate(doc, load_json(schema_path("worker-report.schema.json"), "schema"))
     if errs:
@@ -792,10 +852,16 @@ def op_report_check(args):
             print("INVALID: gate %s exited %s but no criterion is marked FAIL or EXECUTION-PENDING"
                   % (failing[0].get("id"), failing[0].get("exit")))
             sys.exit(1)
+    # [run] artifact checks belong to 'report save' (which always passes --worktree); 'report validate' is schema-only
+    run_ids = [x.strip() for x in opts.get("--run-criteria", "").split(",") if x.strip()]
+    artifacts = check_run_artifacts(doc, opts["--worktree"], run_ids) if opts.get("--worktree") else []
     if out:
         with open(out, "w", encoding="utf-8") as f:
             json.dump(doc, f, indent=2)
             f.write("\n")
+        if artifacts and opts.get("--artifacts-dir"):
+            n = copy_artifacts(artifacts, opts["--artifacts-dir"])
+            print("artifacts: %d file(s) copied to %s" % (n, opts["--artifacts-dir"]))
     print("VALID: %s (unit %s, %d criteria, %d gates)" % (path, doc.get("unit"), len(doc.get("criteria", [])), len(doc.get("gates", []))))
 
 STAGE_FALLBACK = {"integration": ["unit"], "ship": ["integration", "unit"]}
@@ -866,10 +932,217 @@ def op_report_cmds(args):
     print_cmds(cmds, baseline)
 
 def op_manifest_get(args):
+    # manifest-get <manifest> <key[.sub]>: a string prints bare, anything else as JSON, a missing key as ""
     m = load_json(args[0], "manifest")
     validate_or_die(m, schema_path("gates-manifest.schema.json"), "manifest")
-    v = m.get(args[1], "")
-    print(v if isinstance(v, str) else json.dumps(v))
+    node = m
+    for part in args[1].split("."):
+        if isinstance(node, dict) and part in node:
+            node = node[part]
+        else:
+            node = ""
+            break
+    print(node if isinstance(node, str) else json.dumps(node))
+
+def op_worktree_sync_record(args):
+    cp_path, uid, sha = args[0], args[1], args[2]
+    cp = load_cp(cp_path)
+    found = False
+    for w in cp.get("openWorktrees", []):
+        if w.get("unit") == uid:
+            w["syncedAt"] = now()
+            w["syncedTo"] = sha
+            found = True
+    if not found:
+        die("no open worktree registered for unit %s" % uid)
+    save_cp(cp, cp_path)
+
+PUSH_CHECKS = ("pending", "running", "pass", "fail", "skipped")
+
+def op_push_idle(args):
+    """push-idle <cp> <unit>: exit 2 when another unit's recorded checks are still running (ci.serial)."""
+    cp = load_cp(args[0])
+    for u in cp.get("units", []):
+        p = u.get("push")
+        if u.get("id") != args[1] and isinstance(p, dict) and p.get("checks") == "running":
+            die("refused: ci.serial and the checks of unit %s (branch %s, pushed %s) are still running; wait for them "
+                "(or re-run 'orchestrate push %s' to watch them again) before pushing another unit"
+                % (u.get("id"), p.get("branch", ""), p.get("at", ""), u.get("id")), 2)
+    print("idle")
+
+def op_push_claim(args):
+    """push-claim <cp> <unit> --branch <b>: under the lock, exit 2 when another unit's checks are running, else record checks=running."""
+    cp_path, uid = args[0], args[1]
+    opts, _ = parse_opts(args[2:], {"--branch": "v"})
+    cp = load_cp(cp_path)
+    for u in cp.get("units", []):
+        p = u.get("push")
+        if u.get("id") != uid and isinstance(p, dict) and p.get("checks") == "running":
+            die("refused: ci.serial and the checks of unit %s (branch %s, pushed %s) are still running; wait for them "
+                "(or re-run 'orchestrate push %s' to watch them again) before pushing another unit"
+                % (u.get("id"), p.get("branch", ""), p.get("at", ""), u.get("id")), 2)
+    u = find_unit(cp, uid)
+    if u is None:
+        die("unknown unit %s" % uid)
+    rec = u.get("push") if isinstance(u.get("push"), dict) else {}
+    rec["branch"] = opts.get("--branch", rec.get("branch", ""))
+    rec["at"] = now()
+    rec["checks"] = "running"
+    u["push"] = rec
+    save_cp(cp, cp_path)
+    print("claimed")
+
+def op_push_record(args):
+    cp_path, uid = args[0], args[1]
+    opts, _ = parse_opts(args[2:], {"--branch": "v", "--checks": "v", "--pr": "v"})
+    if opts.get("--checks") not in PUSH_CHECKS:
+        die("push record: --checks must be one of %s" % "|".join(PUSH_CHECKS))
+    cp = load_cp(cp_path)
+    u = find_unit(cp, uid)
+    if u is None:
+        die("unknown unit %s" % uid)
+    rec = u.get("push") if isinstance(u.get("push"), dict) else {}
+    if "--branch" in opts:
+        rec["branch"] = opts["--branch"]
+    rec.setdefault("branch", "")
+    rec["at"] = now()
+    rec["checks"] = opts["--checks"]
+    if opts.get("--pr"):
+        rec["pr"] = opts["--pr"]
+    u["push"] = rec
+    save_cp(cp, cp_path)
+    print("push %s: %s checks %s" % (uid, rec["branch"], rec["checks"]))
+
+# ---- docs apply (P3): line-based fragment insert, no regex over the body ----
+def heading_level(line):
+    """1..6 for an ATX heading line, else 0 (string ops only)."""
+    rest = line.lstrip("#")
+    n = len(line) - len(rest)
+    if 0 < n <= 6 and (rest == "" or rest[0] in " \t"):
+        return n
+    return 0
+
+def is_fence(line):
+    s = line.strip()
+    return s.startswith(FENCE) or s.startswith("~~~")
+
+def headings(lines):
+    """(index, level) of every heading line outside fenced code blocks."""
+    in_fence = False
+    for i, l in enumerate(lines):
+        if is_fence(l):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        lv = heading_level(l)
+        if lv:
+            yield i, lv
+
+def find_section(lines, section):
+    """(start, level, end) of the section whose heading line equals `section` exactly; end is the index of
+    the next heading of the same or higher level (or len(lines)). None when the heading is absent."""
+    start, level = None, 0
+    for i, lv in headings(lines):
+        if start is None:
+            if lines[i].rstrip() == section:
+                start, level = i, lv
+        elif lv <= level:
+            return start, level, i
+    if start is None:
+        return None
+    return start, level, len(lines)
+
+def load_fragment(path, rel, section_level):
+    with open(path, "r", encoding="utf-8") as f:
+        flines = f.read().splitlines()
+    while flines and not flines[0].strip():
+        flines.pop(0)
+    if not flines:
+        die("docs apply: fragment %s is empty" % rel)
+    title = flines[0].lstrip("#").strip()
+    if not title:
+        die("docs apply: fragment %s has no title on its first line" % rel)
+    body = flines[1:]
+    while body and not body[0].strip():
+        body.pop(0)
+    while body and not body[-1].strip():
+        body.pop()
+    for i, lv in headings(body):
+        if lv <= section_level:
+            die("docs apply: fragment %s has the heading %s at or above the target section's level %d (it would split the section); use deeper headings"
+                % (rel, json.dumps(body[i]), section_level))
+    return title, body
+
+def op_docs_apply(args):
+    import difflib
+    manifest_file, unit, cwd, dry = args[0], args[1], args[2], args[3] == "1"
+    m = load_json(manifest_file, "manifest")
+    validate_or_die(m, schema_path("gates-manifest.schema.json"), "manifest")
+    entries = m.get("docs") or []
+    if not entries:
+        print("docs apply %s: the manifest has no docs entries (nothing to apply)" % unit)
+        return
+    inserted, skipped, to_delete = 0, 0, []
+    for e in entries:
+        frag_dir, target_rel, section = e["fragments"], e["target"], e["section"].rstrip()
+        target = os.path.join(cwd, target_rel)
+        frags = []
+        p = os.path.join(cwd, frag_dir, unit + ".md")
+        if os.path.isfile(p):
+            frags.append(p)
+        frags += sorted(glob.glob(os.path.join(cwd, glob.escape(frag_dir), glob.escape(unit) + "-*.md")))
+        if not frags:
+            print("docs: no fragment %s/%s.md (or %s-*.md): nothing for %s" % (frag_dir, unit, unit, target_rel))
+            continue
+        if not os.path.isfile(target):
+            die("docs apply: target %s not found under %s" % (target_rel, cwd))
+        with open(target, "r", encoding="utf-8") as f:
+            original = f.read()
+        lines = original.splitlines()
+        found = find_section(lines, section)
+        if found is None:
+            die("docs apply: section %s not found in %s (the heading line must match exactly)" % (json.dumps(section), target_rel))
+        start, level, end = found
+        hlevel = level + 1  # one level below the section heading ("###" under a "##" section)
+        prefix = "#" * hlevel + " " + unit + ":"
+        if any(l.startswith(prefix) for l in lines[start + 1:end]):
+            print("docs: %s section %s already has %s: skipped (%d fragment(s) left in place)" % (target_rel, section, prefix, len(frags)))
+            skipped += len(frags)
+            continue
+        for fp in frags:
+            rel = os.path.relpath(fp, cwd)
+            title, body = load_fragment(fp, rel, level)
+            start, level, end = find_section(lines, section)
+            ins = end
+            while ins > start + 1 and not lines[ins - 1].strip():
+                ins -= 1
+            block = ["", "#" * hlevel + " " + unit + ": " + title]
+            if body:
+                block += [""] + body
+            new = lines[:ins] + block          # the section's trailing blank lines (ins..end) are dropped
+            if end < len(lines):
+                new += [""] + lines[end:]      # exactly one blank line before the next heading
+            lines = new
+            print("docs: %s section %s += %s: %s (from %s)" % (target_rel, section, prefix.rstrip(":"), title, rel))
+            inserted += 1
+            to_delete.append(fp)
+        new_text = "\n".join(lines) + "\n"
+        if dry:
+            sys.stdout.write("".join(difflib.unified_diff(original.splitlines(True), new_text.splitlines(True),
+                                                          "a/" + target_rel, "b/" + target_rel)))
+        else:
+            tmp = target + ".orchestrate.tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(new_text)
+            os.replace(tmp, target)
+    if not dry:
+        for fp in to_delete:
+            try:
+                os.unlink(fp)
+            except OSError:
+                pass
+    print("docs apply %s: %d inserted, %d skipped%s" % (unit, inserted, skipped, " (dry run, nothing written)" if dry else ""))
 
 def op_cache_clean(args):
     manifest_file, cwd = args[0], args[1]
@@ -927,6 +1200,8 @@ OPS = {
     "report-check": op_report_check, "manifest-cmds": op_manifest_cmds, "manifest-get": op_manifest_get,
     "arg-cmds": op_arg_cmds, "report-cmds": op_report_cmds,
     "cache-clean": op_cache_clean, "gate-json": op_gate_json,
+    "worktree-sync-record": op_worktree_sync_record, "push-idle": op_push_idle, "push-claim": op_push_claim, "push-record": op_push_record,
+    "docs-apply": op_docs_apply,
 }
 
 if __name__ == "__main__":
@@ -976,6 +1251,18 @@ usage: orchestrate [--root <path>] [--run <id>] <subcommand> [args]
                                                       reused only when it points at <sha>) + manifest envBootstrap/install; registers in
                                                       openWorktrees; prints "<path> <branch>". --detach: detached HEAD, prints the path only
   worktree remove <unit> [--force]                    git worktree remove + deregister (--force drops uncommitted tracked changes)
+  worktree sync <unit> [--no-bootstrap] [--force-install] [--gate]
+                                                      git merge <integrationBranch> in the unit's worktree (conflict: abort, list the files, exit 3,
+                                                      nothing else changes), then manifest envBootstrap + install (install only when a lockfile
+                                                      changed in the merge, or --force-install); --gate re-runs the unit gates (exit 3 on FAIL).
+                                                      Records syncedAt/syncedTo; prints "<path> merged <sha> install:ran|skipped gates:PASS|FAIL|skipped"
+  docs apply <unit> [--dry-run] [--cwd <dir>]        for every manifest docs entry: insert <fragments>/<unit>.md (and <unit>-*.md) at the end of the
+                                                      named section of <target> under "### <unit>: <fragment title>", delete the fragment; a section
+                                                      that already has "### <unit>:" is skipped; a missing section exits 1. --dry-run prints the diff
+  push <unit> [--pr] [--no-wait]                      git push -u origin <branch> from the unit's worktree; --pr: gh pr create --fill --base
+                                                      <integrationBranch> unless a PR exists. Under manifest ci.serial: refuse (exit 2) when gh is
+                                                      missing or another unit's checks are recorded running, else run ci.checksCmd (default
+                                                      "gh pr checks --watch") on the branch: exit 3 on FAIL; --no-wait records checks pending instead
   gate run <unit> unit|integration|ship [--cwd <dir>] [--cold] [--since <sha>] [--cmd <id>=<command>]...
                                                       run the stage's gates; log + json per run under gates/; exit 3 on FAIL (unit '-' = whole run).
                                                       Commands come from --cmd (repeatable; overrides the manifest), else the manifest
@@ -983,7 +1270,11 @@ usage: orchestrate [--root <path>] [--run <id>] <subcommand> [args]
                                                       falls back to the previous stage), else the unit's newest reports/<unit>-<n>.json gates[]
   report validate <file>                              validate a worker report against schemas/worker-report.schema.json; the file may hold a
                                                       bare JSON object or the worker's verbatim fenced block (```json ... ```)
-  report save <unit> <file>                           validate (Gate 1 rules, unit must match) and copy (fences stripped) to reports/<unit>-<n>.json
+  report save <unit> <file> [--worktree <dir>] [--run-criteria C1,C2]
+                                                      validate (Gate 1 rules, unit must match) and copy (fences stripped) to reports/<unit>-<n>.json.
+                                                      A PASS criterion listed in --run-criteria (needs artifact + runCmd) or carrying "artifact"
+                                                      must name a non-empty file under the worktree (default: the unit's registered worktree, else
+                                                      the cwd), else INVALID naming it; artifacts are copied to reports/<unit>-<n>-artifacts/
   archive check                                       audit the archive; print findings; exit 1 on any
   status                                              print the STATE line from disk (token COMPLETED when nextAction is "ship-gate" or "complete",
                                                       else STOPPED-AWAITING-RESUME)
@@ -1059,6 +1350,11 @@ locked_py() {
   rc=$?
   release_lock
   return $rc
+}
+
+log_line() {
+  # log_line <text>: append one narrative line to the archive's dispatch-log.md
+  printf -- '- %s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >> "$ARCHIVE/dispatch-log.md" 2>/dev/null || true
 }
 
 manifest_path() {
@@ -1235,11 +1531,13 @@ cmd_stall() {
 }
 
 run_bootstrap() {
-  # run_bootstrap <unit> <worktree>: manifest envBootstrap then install, logged to the archive.
+  # run_bootstrap <unit> <worktree> [key...]: manifest envBootstrap then install (or the keys given), logged to the archive.
   local unit="$1" wt="$2" manifest cmd log rc key
+  shift 2
+  [ $# -gt 0 ] || set -- envBootstrap install
   manifest=$(manifest_path) || { echo "no manifest: skipping env bootstrap and install" >&2; return 0; }
   log="$ARCHIVE/gates/$unit-bootstrap.log"
-  for key in envBootstrap install; do
+  for key in "$@"; do
     cmd=$(py manifest-get "$manifest" "$key") || return 1
     [ -n "$cmd" ] || continue
     echo "=== $key: $cmd" >> "$log"
@@ -1316,8 +1614,175 @@ cmd_worktree() {
       fi
       locked_py worktree-deregister "$CHECKPOINT" "$unit" > /dev/null || exit 1
       echo "removed $path" ;;
-    *) die "usage: orchestrate worktree add|remove ..." ;;
+    sync)
+      unit="${1:-}"; [ -n "$unit" ] || die "worktree sync: missing unit"
+      shift
+      worktree_sync "$unit" "$@" ;;
+    *) die "usage: orchestrate worktree add|remove|sync ..." ;;
   esac
+}
+
+# Lockfiles whose change in a merge means `install` must run again (basename match, any directory).
+LOCKFILES="package-lock.json npm-shrinkwrap.json pnpm-lock.yaml yarn.lock bun.lockb bun.lock Cargo.lock poetry.lock uv.lock Pipfile.lock requirements.txt requirements.lock Gemfile.lock composer.lock go.mod go.sum mix.lock pubspec.lock Package.resolved packages.lock.json"
+
+lockfile_changed() {
+  # lockfile_changed <worktree> <before> <after>: exit 0 when a known lockfile changed between the two commits
+  local f name
+  [ "$2" != "$3" ] || return 1
+  git -C "$1" diff --name-only "$2" "$3" 2>/dev/null | while IFS= read -r f; do
+    name=${f##*/}
+    case " $LOCKFILES " in *" $name "*) echo "$f" ;; esac
+  done | grep -q .
+}
+
+worktree_sync() {
+  # worktree sync <unit> [--no-bootstrap] [--force-install] [--gate]: merge the integration branch into the
+  # unit's worktree (exit 3 on conflict, nothing changed), re-bootstrap, optionally re-run the unit gates.
+  local unit="$1" bootstrap=1 force_install=0 gate=0 path branch_i target before after out rc
+  local install_state=skipped gates_state=skipped conflicts
+  shift
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --no-bootstrap) bootstrap=0; shift ;;
+      --force-install) force_install=1; shift ;;
+      --gate) gate=1; shift ;;
+      *) die "worktree sync: unknown argument $1" ;;
+    esac
+  done
+  path=$(py worktree-path "$CHECKPOINT" "$unit") || die "worktree sync: no open worktree registered for $unit"
+  [ -d "$path" ] || die "worktree sync: $path is missing (removed by hand? run 'orchestrate worktree remove $unit')"
+  branch_i=$(py get "$CHECKPOINT" integrationBranch 2>/dev/null) || branch_i=""
+  [ -n "$branch_i" ] || die "worktree sync: the checkpoint has no integrationBranch"
+  target=$(git -C "$ROOT" rev-parse --verify --quiet "refs/heads/$branch_i^{commit}") || die "worktree sync: integration branch $branch_i does not exist"
+  before=$(git -C "$path" rev-parse HEAD 2>/dev/null) || die "worktree sync: $path is not a git worktree"
+  out="$ARCHIVE/gates/.sync.$$"
+  if ! GIT_MERGE_AUTOEDIT=no git -C "$path" merge -q --no-edit "$branch_i" > "$out" 2>&1; then
+    conflicts=$(git -C "$path" diff --name-only --diff-filter=U 2>/dev/null)
+    if [ -n "$conflicts" ] || [ -e "$path/.git/MERGE_HEAD" ] || [ -e "$(git -C "$path" rev-parse --git-path MERGE_HEAD 2>/dev/null)" ]; then
+      git -C "$path" merge --abort > /dev/null 2>&1 || git -C "$path" reset -q --merge > /dev/null 2>&1 || true
+      rm -f "$out"
+      echo "orchestrate: worktree sync $unit: merging $branch_i into $path conflicts; merge aborted, worktree unchanged at $before" >&2
+      echo "CONFLICT: resolve in $path (or in a fix dispatch), then re-run 'orchestrate worktree sync $unit'" >&2
+      printf '%s\n' "$conflicts" | sed '/^$/d; s/^/  conflict: /' >&2
+      exit 3
+    fi
+    cat "$out" >&2
+    rm -f "$out"
+    die "worktree sync: git merge $branch_i failed in $path (uncommitted changes in the way?)"
+  fi
+  rm -f "$out"
+  after=$(git -C "$path" rev-parse HEAD)
+  locked_py worktree-sync-record "$CHECKPOINT" "$unit" "$target" || exit 1
+  if [ $bootstrap -eq 1 ]; then
+    run_bootstrap "$unit" "$path" envBootstrap || { echo "$path merged $target install:failed gates:skipped"; exit 1; }
+    if [ $force_install -eq 1 ] || lockfile_changed "$path" "$before" "$after"; then
+      run_bootstrap "$unit" "$path" install || { echo "$path merged $target install:failed gates:skipped"; exit 1; }
+      install_state=ran
+    fi
+  fi
+  if [ $gate -eq 1 ]; then
+    "$SCRIPT_DIR/orchestrate" --root "$ROOT" --run "$RUN_ID" gate run "$unit" unit --cwd "$path"
+    rc=$?
+    case "$rc" in
+      0) gates_state=PASS ;;
+      3) gates_state=FAIL ;;
+      *) echo "$path merged $target install:$install_state gates:error"; exit "$rc" ;;
+    esac
+  fi
+  log_line "worktree sync $unit: merged $branch_i@$target into $path (before $before, after $after; install:$install_state gates:$gates_state)"
+  echo "$path merged $target install:$install_state gates:$gates_state"
+  [ "$gates_state" != "FAIL" ] || exit 3
+}
+
+cmd_docs() {
+  [ "${1:-}" = "apply" ] || die "usage: orchestrate docs apply <unit> [--dry-run] [--cwd <dir>]"
+  shift
+  local unit="${1:-}" dry=0 cwd="" manifest out rc
+  [ -n "$unit" ] || die "docs apply: missing unit"
+  shift
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --dry-run) dry=1; shift ;;
+      --cwd) [ -n "${2:-}" ] || die "docs apply: --cwd needs a directory"; cwd="$2"; shift 2 ;;
+      *) die "docs apply: unknown argument $1" ;;
+    esac
+  done
+  resolve_run
+  manifest=$(manifest_path) || die "docs apply: no manifest (.claude/orchestrate-gates.json or orchestrate-gates.json under $ROOT) to read docs entries from"
+  [ -n "$cwd" ] || cwd="$ROOT"
+  [ -d "$cwd" ] || die "docs apply: cwd $cwd does not exist"
+  out=$(py docs-apply "$manifest" "$unit" "$cwd" "$dry")
+  rc=$?
+  [ -z "$out" ] || printf '%s\n' "$out"
+  [ $rc -eq 0 ] || exit $rc
+  [ $dry -eq 1 ] || log_line "docs apply $unit in $cwd: $(printf '%s\n' "$out" | tail -1)"
+}
+
+cmd_push() {
+  # push <unit> [--pr] [--no-wait]: push the unit branch, open a PR, watch CI checks one unit at a time under ci.serial.
+  local unit="${1:-}" pr=0 wait=1 path branch branch_i serial="false" checks_cmd="gh pr checks --watch" v
+  local gh_bin="${ORCHESTRATE_GH:-gh}" have_gh=0 manifest checks=skipped pr_url="" pr_state=none log rc
+  [ -n "$unit" ] || die "push: missing unit"
+  shift
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --pr) pr=1; shift ;;
+      --no-wait) wait=0; shift ;;
+      *) die "push: unknown argument $1" ;;
+    esac
+  done
+  resolve_run
+  path=$(py worktree-path "$CHECKPOINT" "$unit") || die "push: no open worktree registered for $unit"
+  [ -d "$path" ] || die "push: worktree $path is missing"
+  branch=$(git -C "$path" rev-parse --abbrev-ref HEAD 2>/dev/null) || die "push: $path is not a git worktree"
+  [ "$branch" != "HEAD" ] || die "push: $path is on a detached HEAD (nothing to push; re-add the worktree on a branch)"
+  branch_i=$(py get "$CHECKPOINT" integrationBranch 2>/dev/null) || branch_i=""
+  if manifest=$(manifest_path); then
+    serial=$(py manifest-get "$manifest" ci.serial) || exit 1
+    v=$(py manifest-get "$manifest" ci.checksCmd) || exit 1
+    [ -z "$v" ] || checks_cmd="$v"
+  fi
+  [ "$serial" = "true" ] || serial="false"
+  command -v "$gh_bin" > /dev/null 2>&1 && have_gh=1
+  if [ "$serial" = "true" ] && [ $have_gh -eq 0 ]; then
+    echo "orchestrate: refused: ci.serial is set but '$gh_bin' is not on PATH: the checks cannot be watched, so pushing would queue a second PR blind (install gh, or set ORCHESTRATE_GH)" >&2
+    exit 2
+  fi
+  [ $pr -eq 0 ] || [ $have_gh -eq 1 ] || die "push: --pr needs '$gh_bin' on PATH"
+  if [ "$serial" = "true" ] && [ $wait -eq 1 ]; then
+    # atomic: the idle check and the running record happen under one lock, before the push
+    locked_py push-claim "$CHECKPOINT" "$unit" --branch "$branch" > /dev/null || exit $?
+  elif [ "$serial" = "true" ]; then
+    py push-idle "$CHECKPOINT" "$unit" > /dev/null || exit $?
+  fi
+  if ! git -C "$path" push -u origin "$branch"; then
+    [ "$serial" != "true" ] || [ $wait -ne 1 ] || locked_py push-record "$CHECKPOINT" "$unit" --branch "$branch" --checks fail > /dev/null
+    die "push: git push -u origin $branch failed in $path"
+  fi
+  if [ $pr -eq 1 ]; then
+    if (cd "$path" && "$gh_bin" pr view "$branch" --json number > /dev/null 2>&1); then
+      pr_state=existing
+    else
+      pr_url=$(cd "$path" && "$gh_bin" pr create --fill --base "$branch_i" --head "$branch") || die "push: gh pr create failed for $branch"
+      pr_state=created
+      [ -z "$pr_url" ] || echo "$pr_url"
+    fi
+  fi
+  if [ "$serial" = "true" ] && [ $wait -eq 1 ]; then
+    [ -z "$pr_url" ] || locked_py push-record "$CHECKPOINT" "$unit" --branch "$branch" --checks running --pr "$pr_url" > /dev/null || exit 1
+    log="$ARCHIVE/gates/$unit-checks.log"
+    printf '\n=== %s %s at %s\n' "$checks_cmd" "$branch" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$log"
+    (cd "$path" && ORCHESTRATE_UNIT="$unit" ORCHESTRATE_BRANCH="$branch" bash -c "$checks_cmd \"\$1\"" orchestrate "$branch") < /dev/null 2>&1 | tee -a "$log"
+    rc=${PIPESTATUS[0]}
+    printf '=== exit %s\n' "$rc" >> "$log"
+    if [ "$rc" -eq 0 ]; then checks=pass; else checks=fail; fi
+  elif [ "$serial" = "true" ]; then
+    checks=pending
+  fi
+  locked_py push-record "$CHECKPOINT" "$unit" --branch "$branch" --checks "$checks" ${pr_url:+--pr "$pr_url"} > /dev/null || exit 1
+  log_line "push $unit: $branch pushed to origin, pr:$pr_state${pr_url:+ $pr_url}, checks:$checks"
+  echo "$branch pushed pr:$pr_state checks:$checks"
+  [ "$checks" != "fail" ] || exit 3
 }
 
 cmd_gate() {
@@ -1417,7 +1882,7 @@ EOF
 }
 
 cmd_report() {
-  local sub="${1:-}" unit file n dest
+  local sub="${1:-}" unit file n dest wt="" run_criteria="" out
   shift || true
   case "$sub" in
     validate)
@@ -1426,18 +1891,32 @@ cmd_report() {
     save)
       unit="${1:-}"; file="${2:-}"
       [ -n "$unit" ] && [ -n "$file" ] || die "report save: need <unit> <file>"
+      shift 2
+      while [ $# -gt 0 ]; do
+        case "$1" in
+          --worktree) [ -n "${2:-}" ] || die "report save: --worktree needs a directory"; wt="$2"; shift 2 ;;
+          --run-criteria) [ -n "${2:-}" ] || die "report save: --run-criteria needs C1,C2,..."; run_criteria="$2"; shift 2 ;;
+          *) die "report save: unknown argument $1" ;;
+        esac
+      done
       resolve_run
-      py report-check "$file" "$unit" || exit 1
+      # [run] artifacts are looked up under --worktree, else the unit's registered worktree, else the cwd
+      [ -n "$wt" ] || wt=$(py worktree-path "$CHECKPOINT" "$unit" 2>/dev/null) || wt="$PWD"
+      [ -d "$wt" ] || die "report save: worktree $wt does not exist"
+      py report-check "$file" "$unit" --worktree "$wt" --run-criteria "$run_criteria" || exit 1
       mkdir -p "$ARCHIVE/reports"
       take_lock
       n=1
       while [ -e "$ARCHIVE/reports/$unit-$n.json" ]; do n=$((n + 1)); done
       dest="$ARCHIVE/reports/$unit-$n.json"
-      # re-parse under the lock and write the bare object (a fenced block is unwrapped)
-      py report-check "$file" "$unit" "$dest.tmp" > /dev/null && mv "$dest.tmp" "$dest" || { rm -f "$dest.tmp"; release_lock; die "report save: copy failed"; }
+      # re-parse under the lock, write the bare object (a fenced block is unwrapped) and copy the run
+      # artifacts to reports/<unit>-<n>-artifacts/ so the evidence survives worktree removal
+      out=$(py report-check "$file" "$unit" "$dest.tmp" --worktree "$wt" --run-criteria "$run_criteria" --artifacts-dir "$ARCHIVE/reports/$unit-$n-artifacts") \
+        && mv "$dest.tmp" "$dest" || { rm -f "$dest.tmp"; rm -rf "$ARCHIVE/reports/$unit-$n-artifacts"; release_lock; die "report save: copy failed"; }
       release_lock
+      printf '%s\n' "$out" | grep '^artifacts: ' || true
       echo "$dest" ;;
-    *) die "usage: orchestrate report validate <file> | save <unit> <file>" ;;
+    *) die "usage: orchestrate report validate <file> | save <unit> <file> [--worktree <dir>] [--run-criteria C1,C2]" ;;
   esac
 }
 
@@ -1540,6 +2019,8 @@ main() {
     worktree) cmd_worktree "$@" ;;
     gate) cmd_gate "$@" ;;
     report) cmd_report "$@" ;;
+    docs) cmd_docs "$@" ;;
+    push) cmd_push "$@" ;;
     archive) cmd_archive "$@" ;;
     status) cmd_status "$@" ;;
     cost) cmd_cost "$@" ;;

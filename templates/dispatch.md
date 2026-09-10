@@ -1,6 +1,6 @@
 <!-- Worker dispatch contract (file-referenced dispatch). Copy this file, fill every <placeholder>, write it to <archive>/dispatch/<unit>.md before `orchestrate dispatch open <unit> --role worker --epoch <epoch>`.
 The Agent prompt is then the pointer sentence: "read <that path>, execute exactly, final text = report per the contract's output format; do not use SendMessage or any messaging tool; your final text is your entire report." Pass model and effort from the plan table and run_in_background: false (honored on some versions, never sufficient alone).
-A retry is the same pointer plus the verifier's verdict path. On return: `orchestrate report save <unit> <file.json>` (Gate 1 starts there), then `orchestrate gate run <unit> unit --cwd <worktree>`, and only after Gate 1: `orchestrate dispatch close <unit> <n> --exit <Gate 1 result> --evidence gates/<unit>-unit-<n>.log --tokens <t> --duration <s>`.
+A retry is the same pointer plus the verifier's verdict path. On return: `orchestrate report save <unit> <file.json> --worktree <worktree> --run-criteria <ids of the [run] criteria>` (Gate 1 starts there; a PASS on a `[run]` criterion whose `artifact` is missing or empty under the worktree is INVALID, exit 1; the artifacts are copied to `reports/<unit>-<n>-artifacts/`), then `orchestrate gate run <unit> unit --cwd <worktree>`, and only after Gate 1: `orchestrate dispatch close <unit> <n> --exit <Gate 1 result> --evidence gates/<unit>-unit-<n>.log --tokens <t> --duration <s>`.
 The dispatcher fills the Gates line below from the manifest's unit stage with `{{baseline}}` already replaced by `<baselineSha>`; the worker never reads the manifest. -->
 
 # Dispatch contract: <unit>
@@ -18,14 +18,16 @@ Sub-agents share nothing with the dispatcher or each other; over-include rather 
 - Files in scope: `<declared file scope>`. Changes outside it fail the diff-scope check.
 - Constraints and conventions: `<relevant paths, patterns to follow, things that must not change>`.
 - Related units running in parallel: `<ids and their file scopes, or none>`.
-- Shared docs: `<either "you own <file> this wave" or "write your fragment to docs/_pending/<unit>.md; do not edit <file>">`.
+- Shared docs: write docs fragments to `<fragments>/<unit>.md` (the manifest `docs[].fragments` directory, e.g. `docs/_pending`; create it with `mkdir -p` first, git does not keep empty directories; first line = the title); never edit the target `<docs[].target>`; the dispatcher inserts the fragment with `orchestrate docs apply <unit>` at integration.
 
 ## 3. Done-criteria (IDs C1..Cn; verifiers and `dispatch close --evidence` reuse them)
 
 Each criterion is decidable: mechanically checkable wherever possible (exact command, invariant, expected diff scope), otherwise judgeable from evidence by a Gate 2 verifier, with the settling evidence stated. If no decidable criterion can be stated, the unit is under-specified: re-decompose instead of dispatching.
 
-- C1: <criterion> · evidence: <exact command and expected exit, invariant, or diff scope>
-- C2: <criterion> · evidence: <...>
+Every criterion that involves executing something (tests, e2e, a script against a dev environment, a build) carries the tag `[run]` after its ID. **Prove it ran:** a `[run]` criterion is PASS only when its report entry carries `artifact` (repo-relative path of the runner's output under the worktree: a tee'd log or a junit/json report) and `runCmd` (the exact command that produced it), and `evidence` quotes the artifact's count or summary line ("18 scenarios, 18 passed, 0 failed; log at <path>"). "Tests written" or "tests look right" is never PASS. When the environment cannot run it, the status is EXECUTION-PENDING with `runCmd` filled so the dispatcher runs it post-merge. Verifiers judge a `[run]` criterion from the artifact, never from the test source.
+
+- C1 [run]: <criterion> · evidence: <exact command, artifact path, expected exit and summary line>
+- C2: <criterion> · evidence: <exact command and expected exit, invariant, or diff scope>
 - Cn: <criterion> · evidence: <...>
 
 UI units add a reachability criterion (import-chain grep proving a route-reachable file imports the component; runtime mount evidence post-merge). Stateful modules name the expected init site (composition root) so the init-wiring grep is decidable.
@@ -42,7 +44,10 @@ Your final text is exactly ONE fenced `json` block matching `schemas/worker-repo
   "commits": ["sha1", "sha2"],
   "filesChanged": ["path"],
   "gates": [ { "id": "typecheck", "cmd": "pnpm typecheck", "exit": 0 } ],
-  "criteria": [ { "id": "C1", "status": "PASS|FAIL|EXECUTION-PENDING", "evidence": "≤ 40 words: command + exit, test name, or file:line" } ],
+  "criteria": [
+    { "id": "C1", "status": "PASS|FAIL|EXECUTION-PENDING", "evidence": "≤ 40 words: the artifact's summary line + path", "artifact": "<repo-relative path of the run output ([run] criteria)>", "runCmd": "<exact command that produced it ([run] criteria)>" },
+    { "id": "C2", "status": "PASS|FAIL|EXECUTION-PENDING", "evidence": "≤ 40 words: command + exit, invariant, or file:line" }
+  ],
   "deviations": ["fast-forwarded base to <sha>", "..."],
   "envVars": ["NAME_READ_BY_THE_CHANGE"],
   "pendingRuntimeChecks": ["what must be checked post-merge with a live env"],
@@ -52,7 +57,7 @@ Your final text is exactly ONE fenced `json` block matching `schemas/worker-repo
 }
 ```
 
-Required: `unit`, `branch`, `baselineSha`, `headSha`, `commits`, `filesChanged`, `gates`, `criteria`, `deviations`, `backgroundProcesses` (must equal the literal `"none"`). `criteria[].id` uses the IDs from section 3, one entry per criterion. Every gate you ran appears in `gates[]` with its real exit code; a non-zero exit needs the matching criterion marked FAIL or EXECUTION-PENDING. Empty arrays are fine; missing keys are not. Whole report ≤ <N> tokens.
+Required: `unit`, `branch`, `baselineSha`, `headSha`, `commits`, `filesChanged`, `gates`, `criteria`, `deviations`, `backgroundProcesses` (must equal the literal `"none"`). `criteria[].id` uses the IDs from section 3, one entry per criterion. Every gate you ran appears in `gates[]` with its real exit code; a non-zero exit needs the matching criterion marked FAIL or EXECUTION-PENDING. `artifact` and `runCmd` are optional keys, required on every `[run]` criterion reported PASS (and `runCmd` on one reported EXECUTION-PENDING); `report save` rejects a `[run]` PASS whose artifact does not exist or is empty. Empty arrays are fine; missing keys are not. Whole report ≤ <N> tokens.
 
 ## 5. Depth instruction
 
@@ -62,8 +67,9 @@ Required: `unit`, `branch`, `baselineSha`, `headSha`, `commits`, `filesChanged`,
 
 > You are in an isolated worktree at `<absolute worktree path>` on branch `<branch>`; baseline `<baselineSha>`.
 > - **Verify your base FIRST:** run `git merge-base --is-ancestor <baselineSha> HEAD`. If it fails, exactly ONE self-remedy is permitted: when HEAD is an ancestor of the baseline (pure fast-forward, verify with the reverse check `git merge-base --is-ancestor HEAD <baselineSha>`), you MAY `git merge --ff-only <baselineSha>` and MUST disclose it in `deviations` as `fast-forwarded base to <sha>`. Any other mismatch: STOP and report; do not improvise a new branch, do not merge.
-> - **Environment:** the manifest's `envBootstrap` (`<envBootstrap, e.g. cp -n .env.example .env>`) and `install` (`<install command, frozen lockfile, e.g. pnpm install --frozen-lockfile>`) already ran at `orchestrate worktree add` (log: `gates/<unit>-bootstrap.log`); re-run `<install command>` only if the dependency directory (e.g. `node_modules`) is missing. Runtime services are unavailable: run mechanical gates only (typecheck / lint / unit tests). Mark any done-criterion you cannot check without runtime **EXECUTION-PENDING** and list what must be checked in `pendingRuntimeChecks`; it is checked post-merge in the integration worktree. List every environment variable your change reads in `envVars`.
+> - **Environment:** the manifest's `envBootstrap` (`<envBootstrap, e.g. cp -n .env.example .env>`) and `install` (`<install command, frozen lockfile, e.g. pnpm install --frozen-lockfile>`) already ran at `orchestrate worktree add` (log: `gates/<unit>-bootstrap.log`); re-run `<install command>` only if the dependency directory (e.g. `node_modules`) is missing. Runtime services are unavailable: run mechanical gates only (typecheck / lint / unit tests). Mark any done-criterion you cannot check without runtime **EXECUTION-PENDING**, with `runCmd` filled, and list what must be checked in `pendingRuntimeChecks`; it is checked post-merge in the integration worktree. List every environment variable your change reads in `envVars`.
 > - **Gates:** run exactly these commands (the manifest's unit gates with `{{baseline}}` already replaced by `<baselineSha>`): `<gate id: command, one per gate>`. Do not read the manifest yourself. Record each in `gates[]` with its exit code.
+> - **Prove it ran:** every `[run]` criterion is decided by executing it, with the runner's output tee'd to a file under this worktree (e.g. `test-results/<unit>-C1.log`, left uncommitted) and reported as `artifact` plus the exact `runCmd`; `evidence` quotes the artifact's summary line. Written but unexecuted tests are never PASS; an artifact that does not exist or is empty fails `report save`.
 > - **Phantom-failure rule:** if a gate fails, re-run it on the untouched base in this same worktree before attributing it to your change (dependency drift in fresh installs produces phantom failures). Report "pre-existing on base" findings in `preExistingOnBase`; do not fix them, do not block on them.
 > - **Never leave background processes:** end only when nothing you started is still running; `backgroundProcesses` must be the literal `none`. No watcher, dev server, or polling loop may outlive your final text.
 > - **Return:** commit granularly. The JSON report carries branch name, commit SHAs, files changed, and each gate command with its result. ≤ <N> tokens, no narration.

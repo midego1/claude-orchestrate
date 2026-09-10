@@ -42,6 +42,7 @@ PASS|FAIL — C3 — evidence: <specific test output, line numbers, or diff hunk
 - Check what is actually there. The worker's report at `reportPath` is a claim, never evidence; never take the worker's own claims as evidence.
 - Evaluate criteria only against files inside `diffRange`; a file outside the range counts only when the criterion names it.
 - If a criterion cannot be checked from the material you were given, return FAIL with `evidence: not checkable from provided material`; do not guess.
+- A `[run]` criterion is judged from its run artifact (the file named in the dispatch), never from the test source; PASS without one is FAIL with `evidence: no run artifact`.
 - If a criterion needs judgment (root cause vs symptom, semantic equivalence, edge-case coverage) or covers security- or correctness-critical output, return FAIL with `evidence: requires judgment; route to verifier-deep`.
 - Scoped re-verify (`scope` lists IDs): evaluate only those IDs, do not re-litigate PASSed items, read `priorVerdictRef` only to learn what was open.
 - No narration, no summary paragraph, no advice. Only the RANGE line, the verdict lines, and the VERDICT line.

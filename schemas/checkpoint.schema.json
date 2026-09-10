@@ -58,7 +58,9 @@
           "path": { "type": "string", "minLength": 1 },
           "branch": { "type": "string" },
           "unit": { "type": "string", "minLength": 1 },
-          "baselineSha": { "type": "string" }
+          "baselineSha": { "type": "string" },
+          "syncedAt": { "type": "string", "description": "Last 'orchestrate worktree sync' (UTC)." },
+          "syncedTo": { "type": "string", "description": "Integration-branch sha merged in by the last 'worktree sync'." }
         }
       }
     },
@@ -80,6 +82,17 @@
           "sha": { "type": "string" },
           "evidenceRef": { "type": "string" },
           "spotCheck": { "type": "string" },
+          "push": {
+            "type": "object",
+            "description": "Last 'orchestrate push' of the unit branch. checks: running while ci.checksCmd is being watched (a second push of another unit is refused under ci.serial), pass|fail its result, pending when --no-wait skipped the watch, skipped when the manifest has no ci.serial.",
+            "required": ["branch", "at", "checks"],
+            "properties": {
+              "branch": { "type": "string" },
+              "at": { "type": "string" },
+              "checks": { "type": "string", "enum": ["pending", "running", "pass", "fail", "skipped"] },
+              "pr": { "type": "string", "description": "URL printed by gh pr create, when push --pr opened the PR." }
+            }
+          },
           "dispatches": {
             "type": "array",
             "items": {
