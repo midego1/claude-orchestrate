@@ -970,6 +970,28 @@ def op_push_idle(args):
                 % (u.get("id"), p.get("branch", ""), p.get("at", ""), u.get("id")), 2)
     print("idle")
 
+def op_push_claim(args):
+    """push-claim <cp> <unit> --branch <b>: under the lock, exit 2 when another unit's checks are running, else record checks=running."""
+    cp_path, uid = args[0], args[1]
+    opts, _ = parse_opts(args[2:], {"--branch": "v"})
+    cp = load_cp(cp_path)
+    for u in cp.get("units", []):
+        p = u.get("push")
+        if u.get("id") != uid and isinstance(p, dict) and p.get("checks") == "running":
+            die("refused: ci.serial and the checks of unit %s (branch %s, pushed %s) are still running; wait for them "
+                "(or re-run 'orchestrate push %s' to watch them again) before pushing another unit"
+                % (u.get("id"), p.get("branch", ""), p.get("at", ""), u.get("id")), 2)
+    u = find_unit(cp, uid)
+    if u is None:
+        die("unknown unit %s" % uid)
+    rec = u.get("push") if isinstance(u.get("push"), dict) else {}
+    rec["branch"] = opts.get("--branch", rec.get("branch", ""))
+    rec["at"] = now()
+    rec["checks"] = "running"
+    u["push"] = rec
+    save_cp(cp, cp_path)
+    print("claimed")
+
 def op_push_record(args):
     cp_path, uid = args[0], args[1]
     opts, _ = parse_opts(args[2:], {"--branch": "v", "--checks": "v", "--pr": "v"})
@@ -1082,7 +1104,7 @@ def op_docs_apply(args):
         if found is None:
             die("docs apply: section %s not found in %s (the heading line must match exactly)" % (json.dumps(section), target_rel))
         start, level, end = found
-        hlevel = max(3, level + 1)
+        hlevel = level + 1  # one level below the section heading ("###" under a "##" section)
         prefix = "#" * hlevel + " " + unit + ":"
         if any(l.startswith(prefix) for l in lines[start + 1:end]):
             print("docs: %s section %s already has %s: skipped (%d fragment(s) left in place)" % (target_rel, section, prefix, len(frags)))
@@ -1178,7 +1200,7 @@ OPS = {
     "report-check": op_report_check, "manifest-cmds": op_manifest_cmds, "manifest-get": op_manifest_get,
     "arg-cmds": op_arg_cmds, "report-cmds": op_report_cmds,
     "cache-clean": op_cache_clean, "gate-json": op_gate_json,
-    "worktree-sync-record": op_worktree_sync_record, "push-idle": op_push_idle, "push-record": op_push_record,
+    "worktree-sync-record": op_worktree_sync_record, "push-idle": op_push_idle, "push-claim": op_push_claim, "push-record": op_push_record,
     "docs-apply": op_docs_apply,
 }
 
@@ -1727,10 +1749,16 @@ cmd_push() {
     exit 2
   fi
   [ $pr -eq 0 ] || [ $have_gh -eq 1 ] || die "push: --pr needs '$gh_bin' on PATH"
-  if [ "$serial" = "true" ]; then
+  if [ "$serial" = "true" ] && [ $wait -eq 1 ]; then
+    # atomic: the idle check and the running record happen under one lock, before the push
+    locked_py push-claim "$CHECKPOINT" "$unit" --branch "$branch" > /dev/null || exit $?
+  elif [ "$serial" = "true" ]; then
     py push-idle "$CHECKPOINT" "$unit" > /dev/null || exit $?
   fi
-  git -C "$path" push -u origin "$branch" || die "push: git push -u origin $branch failed in $path"
+  if ! git -C "$path" push -u origin "$branch"; then
+    [ "$serial" != "true" ] || [ $wait -ne 1 ] || locked_py push-record "$CHECKPOINT" "$unit" --branch "$branch" --checks fail > /dev/null
+    die "push: git push -u origin $branch failed in $path"
+  fi
   if [ $pr -eq 1 ]; then
     if (cd "$path" && "$gh_bin" pr view "$branch" --json number > /dev/null 2>&1); then
       pr_state=existing
@@ -1741,7 +1769,7 @@ cmd_push() {
     fi
   fi
   if [ "$serial" = "true" ] && [ $wait -eq 1 ]; then
-    locked_py push-record "$CHECKPOINT" "$unit" --branch "$branch" --checks running ${pr_url:+--pr "$pr_url"} > /dev/null || exit 1
+    [ -z "$pr_url" ] || locked_py push-record "$CHECKPOINT" "$unit" --branch "$branch" --checks running --pr "$pr_url" > /dev/null || exit 1
     log="$ARCHIVE/gates/$unit-checks.log"
     printf '\n=== %s %s at %s\n' "$checks_cmd" "$branch" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$log"
     (cd "$path" && ORCHESTRATE_UNIT="$unit" ORCHESTRATE_BRANCH="$branch" bash -c "$checks_cmd \"\$1\"" orchestrate "$branch") < /dev/null 2>&1 | tee -a "$log"

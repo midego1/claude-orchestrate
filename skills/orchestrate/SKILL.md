@@ -75,7 +75,7 @@ Docs-verified 2026-09-09 (REFERENCE.md § Harness facts). Fork mode (interactive
  "dispatchTally":{"used":0,"cap":0,"capSource":"planned-slots | manual"},
  "owner":{"agentId":"","epoch":1},"stallCount":0,"lastStallAt":"",
  "openWorktrees":[{"path":"…","branch":"…","unit":"…","baselineSha":"…","syncedAt":"…","syncedTo":"…"}],
- "units":[{"id":"U1","status":"pending|in-flight|integrated|failed|surfaced","tier":"T1","model":"sonnet","effort":"high","verifier":"fast|deep|none","isolation":"worktree|shared","dependsOn":[],"sha":"","evidenceRef":"","spotCheck":"","push":{"branch":"","at":"","checks":""},
+ "units":[{"id":"U1","status":"pending|in-flight|integrated|failed|surfaced","tier":"T1","model":"sonnet","effort":"high","verifier":"fast|deep|none","isolation":"worktree|shared","dependsOn":[],"sha":"","evidenceRef":"","spotCheck":"","push":{"branch":"","at":"","checks":"pending|running|pass|fail|skipped"},
    "dispatches":[{"n":1,"role":"worker","epoch":1,"model":"sonnet","effort":"high","openedAt":"…","closedAt":"…","durationSec":0,"tokens":0,"tokensIn":0,"tokensOut":0,"result":"PASS|FAIL|open","evidenceRef":""}]}],
  "nextAction":"setup | dispatch <ids> | integrate <id> | ship-gate | complete | paused: <reason>"}
 ```

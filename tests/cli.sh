@@ -870,6 +870,21 @@ check_exit 0 "docs apply --cwd <integration worktree>" "$ORCH" docs apply D1 --c
 check_true "--cwd target updated" grep -q "### D1: From cwd" "$WORK/int-wt/docs/features.md"
 check_true "--cwd left the root checkout alone" test "$(cat docs/features.md docs/e2e.md | cksum)" = "$SUM_AFTER"
 git worktree remove --force "$WORK/int-wt"
+# a "###" section gets a "####" unit heading (one level below the section), never a "###" that would split it (Codex P2, v0.6.1)
+printf '# Deep\n\n## Area\n\n### Notes\n\nkeep\n\n### Later\n\nlater\n' > docs/deep.md
+python3 - "$REPO/.claude/orchestrate-gates.json" <<'PY'
+import json, sys
+m = json.load(open(sys.argv[1])); m["docs"] = [{"fragments": "docs/_pending", "target": "docs/deep.md", "section": "### Notes"}]; json.dump(m, open(sys.argv[1], "w"), indent=2)
+PY
+printf '# Deep note\n\ndeep body\n' > docs/_pending/D1.md
+check_exit 0 "docs apply into a ### section" "$ORCH" docs apply D1
+check_true "unit heading is one level below (####)" grep -q "^#### D1: Deep note" docs/deep.md
+check_true "### Later section still follows the insert" python3 - docs/deep.md <<'PY'
+import sys
+t = open(sys.argv[1]).read()
+assert t.index("#### D1: Deep note") < t.index("### Later"), t
+assert "deep body" in t
+PY
 
 # ---------------------------------------------------------------------------
 echo "== push"
@@ -884,7 +899,7 @@ last=""; for last; do :; done
 case "${1:-} ${2:-}" in
   "pr view") exit "${GH_PR_EXISTS:-1}" ;;
   "pr create") echo "https://example.invalid/pull/1"; exit 0 ;;
-  "pr checks") echo "stub checks for $last"; exit "${GH_CHECKS_EXIT:-0}" ;;
+  "pr checks") echo "stub checks for $last"; sleep "${GH_CHECKS_SLEEP:-0}"; exit "${GH_CHECKS_EXIT:-0}" ;;
 esac
 exit 0
 EOF
@@ -943,6 +958,15 @@ python3 - "$REPO/.claude/orchestrate-gates.json" <<'PY'
 import json, sys
 m = json.load(open(sys.argv[1])); m["ci"] = {"serial": True}; json.dump(m, open(sys.argv[1], "w"), indent=2)
 PY
+# atomic claim: a second push must be refused while the first one is still watching its checks (Codex P1, v0.6.1)
+( env PATH="$WORK/bin:$PATH" GH_CHECKS_SLEEP=4 "$ORCH" push P2 > "$WORK/push-bg.out" 2>&1 ) &
+_bg=$!
+sleep 1.5
+check_exit 2 "concurrent push P1 while P2's watch is live: refused (claim is atomic)" env PATH="$WORK/bin:$PATH" "$ORCH" push P1
+check_true "P1 not pushed by the refused call" test "$(unit_field P1 push.checks)" = "pending"
+wait $_bg
+check_true "background push P2 finished with checks pass" grep -q "checks:pass" "$WORK/push-bg.out"
+check_true "P2 recorded pass after the watch" test "$(unit_field P2 push.checks)" = "pass"
 check_exit 0 "push P1 with the default checksCmd" env PATH="$WORK/bin:$PATH" "$ORCH" push P1
 check_true "default checksCmd is gh pr checks --watch <branch>" grep -q "^pr checks --watch unit/P1$" "$GH_LOG"
 check_true "push.checks pass" test "$(unit_field P1 push.checks)" = "pass"
