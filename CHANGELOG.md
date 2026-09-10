@@ -4,6 +4,22 @@ All notable changes to the orchestrate plugin. The update notifier reads this fi
 
 ## [Unreleased]
 
+## [0.6.2] — 2026-09-10
+
+First live `/orchestrate` run on v0.6.1 (2 units, direct mode, 5 dispatches, 296k tokens, COMPLETED, archive clean). The CLI-enforced rules held; the prose-only ones did not: the routing table was never shown, and four steps were still done by hand. Every finding below became a command.
+
+**Why update:** the routing table is now a command (`orchestrate plan show`) that is pasted, not reconstructed; `contract new` and `contract verify` write the dispatch and verifier prompts from the templates with every known value filled; `report save <unit> -` takes the worker's block from stdin; and `integrate` turns sync, merge, docs commit, integration gate and unit set into one step with one recorded SHA.
+
+- **`orchestrate plan show`** prints the canonical routing table (one row per unit: tier, model, effort, isolation, verifier, slots, dispatches, depends) and the cap line from the checkpoint; the skill requires that output pasted verbatim before the first dispatch, and a reply that dispatches without it is a protocol violation. Field case: the orchestrator summarised the plan in prose and dispatched
+- **`orchestrate contract new <unit> [--objective] [--files]`** writes `dispatch/<unit>.md` from `templates/dispatch.md` with the worktree path, branch, baseline, integration branch, manifest gates (`{{baseline}}` substituted), bootstrap and install commands, fragments dir and target filled, and lists the placeholders left for the orchestrator (criteria, constraints, depth). **`orchestrate contract verify <unit> --head <sha> [--deep]`** writes the Gate 2 prompt with repoRoot, baseline, head, diffRange, report path, artifacts dir and the criteria copied from the contract, and prints the pointer sentence and the `dispatch open` line; `--scope <ids> --since <lastPassedSha> [--prior <ref>]` writes the scoped re-verify as `dispatch/<unit>-reverify-<n>.md`. Field case: both prompts filled by hand
+- **`orchestrate report save <unit> -`** reads the worker's fenced block from stdin (`<<'EOF'`), same artifact checks. Field case: report copied to `/tmp` first
+- **`orchestrate integrate <unit> [--cold] [--no-sync] [--no-docs]`**: refuses on a dirty root or the wrong branch; `worktree sync --gate`; `git merge --no-ff`; `docs apply` plus a `docs(<unit>): apply fragments` commit that also stages the fragment deletion; integration gate (cold on `--cold`, implied for the last unit); on PASS `unit set integrated` with the SHA after the docs commit (that SHA is the recorded one); on FAIL the merge stays and the unit is not marked. Exit 3 on any conflict or FAIL. Field cases: four hand steps, which SHA counts, staged deletion
+- **Ship gate and cwd**: host `/code-review` and `/security-review` review the session cwd, so they count only when the orchestrated repo is the cwd; otherwise `dispatch open ship --role review|security` with the integrated diff range and every recorded spot-check as a criterion
+- **Documented**: `init` defaults to `--mode DIRECT` and prints it; worktrees live at `<integrationRoot>/.claude/worktrees/<unit>` (git-excluded, printed by `worktree add`, filled by `contract new`); every manifest unit gate must pass on the baseline, a gate that only exists after a unit is that unit's `[run]` criterion and dependents take `--depends`; `docs apply` deletes the fragment
+- **CLAUDE.md** for contributors: enforce, do not exhort; never weaken a rule; word guidance as soft targets with hard ceilings (SKILL.md 4,500 / 5,200, foreman.md 3,000 / 3,400, DIRECT-MODE.md 1,200 / 1,400); harness claims need a docs quote or a probe; CLI constraints; release steps
+- **Tests**: `tests/cli.sh` 729 checks (was 491)
+- **Migration from 0.6.1**: none; the new commands are additive, existing runs keep working
+
 ## [0.6.1] — 2026-09-10
 
 First field run on v0.6.0: 6 units for USD 12.95 (10 sonnet, 5 haiku, 1 opus; the frontier model only as orchestrator), Gate 2 caught two real defects (a tsconfig alias against a recorded decision; a quantity falling back to 1), and the CLI state survived two memory kills and a context compaction. Four things still cost hand work; each becomes a CLI command or a contract rule.

@@ -146,7 +146,7 @@ Given a substantive task, the orchestrator:
 4. **Isolates file-mutating work.** Each writer gets a git worktree created at the exact baseline SHA, re-checks its own base, and fails fast rather than improvising a branch; passed units merge back one at a time with gates re-run after each merge. Where isolation isn't available, concurrent writers share the tree under a hard git-hygiene rule — scoped `git add <path>` only, never `git add -A` or `git stash` — with a ceiling of 2–3 writers holding disjoint file scopes, and a tree audit after every wave.
 5. **Verifies everything through gates.** Mechanical checks first (tests, builds, grep invariants, plus reachability greps proving new code is imported *and* init-wired — free), then cheap verifier agents that must cite evidence. A verdict without evidence is a FAIL. Go/no-go gates run **cold**, with build caches cleared, because a warm cache misreports both error counts and causes: two cold runs per plan, the final integration gate and the ship gate; per-unit gates and per-merge integration gates run warm (cold when a merge touched build config or dependencies).
 6. **Escalates only real capability failures** — after triage rules out bad specs, broken environments, and failure modes the repo's test infrastructure structurally can't exercise — one step at a time (effort before model), capped at 3 dispatches per unit and a global dispatch cap for the plan.
-7. **Integrates** gate-passed results, checks cross-unit consistency, runs a final **ship gate** — automated code review plus security review over the integrated diff, preferring your host's own `/security-review` when it has one — and ships.
+7. **Integrates** gate-passed results, checks cross-unit consistency, runs a final **ship gate** — automated code review plus security review over the integrated diff, preferring your host's own `/security-review` when it has one and the orchestrated repo is the session cwd (the host reviews look at the cwd, so a run driven from elsewhere dispatches reviewers instead) — and ships.
 
 Every run is **checkpointed**: state lands in `checkpoint.json` before each dispatch round and after each integration, so a foreman killed by a network drop, a spend limit, or a host restart resumes from disk instead of restarting the plan.
 
@@ -154,7 +154,7 @@ The net effect: frontier-quality output at a fraction of frontier cost, with fai
 
 ### What you see before it spends anything
 
-Every run opens with the routing plan in one canonical table — which agents get kicked off, on which models, at what depth, and who verifies each one — so you can veto the plan before any dispatch. A real plan looks like this:
+Every run opens with the routing plan in one canonical table — which agents get kicked off, on which models, at what depth, and who verifies each one — so you can veto the plan before any dispatch. `orchestrate plan show` prints it from the run's checkpoint, and the orchestrator pastes that output verbatim before the first dispatch (a prose summary is not the table). A real plan looks like this:
 
 | unit | tier | model | effort | isolation | verifier | slots | dispatches |
 |---|---|---|---|---|---|---|---|
@@ -163,11 +163,11 @@ Every run opens with the routing plan in one canonical table — which agents ge
 | U3 unit tests for U2 | T1 | sonnet | medium | worktree | fast | 4 | 0/4 |
 | U4 export UI component | T1 | sonnet | high | worktree | fast | 4 | 0/4 |
 | U5 audit-trail guard | T2 | opus | xhigh | worktree | deep | 4 | 0/4 |
-| U6 sweep: update 12 call sites | T0 | haiku | — | worktree | fast | 4 | 0/4 |
+| U6 sweep: update 12 call sites | T0 | haiku | - | worktree | fast | 4 | 0/4 |
 
-`cap: 0/28 · foreman: opus @ high · integration branch: feat/report-model`
+`cap: 0/28 · foreman: opus @ high · integration branch: feat/report-model · run: 20260909-1530`
 
-The cap is the sum of planned slots: 4 per verified unit (worker, verifier, fix, re-verify), 2 per unit that rides the ship-gate spot-check, plus 4 for the ship gate (6 × 4 + 4 = 28 here). `dispatch open` refuses at the cap.
+The cap is the sum of planned slots: 4 per verified unit (worker, verifier, fix, re-verify), 2 per unit that rides the ship-gate spot-check, plus 4 for the ship gate (6 × 4 + 4 = 28 here). `dispatch open` refuses at the cap. A direct-mode run prints `mode: DIRECT` in place of the foreman entry; `-` is the effort of a haiku unit (haiku takes none).
 
 The `verifier` column shows which units get the deep (sonnet @ xhigh) verifier — that's where the security/correctness guarantee lives. Verification is rationed against the cap deliberately: security- and data-loss-critical units always get a dedicated independent verifier, while mechanical and config units ride the ship-gate review instead, recorded as named spot-checks rather than silently skipped. The table maps 1:1 onto the run's `checkpoint.json`, so the plan you approved and the state a crashed run recovers from are the same thing. It's announced once; live progress arrives as one `STATE:` line per foreman turn (`STATE: integrated <sha> · tally <n>/<cap> · next <nextAction> · …`) — ending in `COMPLETED` when the next action is `ship-gate` or `complete` (the dispatch loop is done; the ship gate belongs to the orchestrator) and `STOPPED-AWAITING-RESUME` for everything else, paused runs included, so a round-end report can't be mistaken for a run still in flight — not as tables through your expensive context.
 
@@ -277,9 +277,9 @@ Effort is a second, cheaper lever than model choice — Sonnet at `xhigh` often 
 | [`agents/foreman`](agents/foreman.md) | opus @ high | Execution manager: dispatch loop, gates, triage, retries, escalation ledger |
 | [`agents/verifier-fast`](agents/verifier-fast.md) | haiku | Gate 2: PASS/FAIL per done-criterion, evidence required |
 | [`agents/verifier-deep`](agents/verifier-deep.md) | sonnet @ xhigh | Gate 2 for judgment calls: also reports what's *missing* vs. the spec (`MISSING` lines) |
-| [`skills/orchestrate/DIRECT-MODE.md`](skills/orchestrate/DIRECT-MODE.md) | (loads on demand) | The ordered direct-mode checklist for plans of 5 units or fewer: preflight, init, plan, baseline worktrees, dispatch, gates, merge order, ship gate, archive check |
+| [`skills/orchestrate/DIRECT-MODE.md`](skills/orchestrate/DIRECT-MODE.md) | (loads on demand) | The ordered direct-mode checklist for plans of 5 units or fewer: preflight, init, plan table, baseline worktrees, contract, dispatch, gates, integrate, ship gate, archive check |
 | [`skills/orchestrate/REFERENCE.md`](skills/orchestrate/REFERENCE.md) | (loads on demand) | Field anecdotes and the rationale behind each rule, moved out of the skill so the operator card stays short |
-| [`bin/orchestrate`](bin/orchestrate) | (bash 3.2 + python3) | The CLI, every subcommand: `preflight`, `init`, `plan set`, `unit set`, `dispatch open/close`, `lease take/check`, `handoff`, `stall record`, `worktree add/remove/sync`, `gate run`, `report validate/save`, `docs apply`, `push`, `archive check`, `status`, `cost`, `stale`, `pause`/`resume`, `next set`, `complete` (alias of `next set complete`), `harness set dispatch`, `help`. Every write takes a lock and validates the checkpoint against its schema before it lands |
+| [`bin/orchestrate`](bin/orchestrate) | (bash 3.2 + python3) | The CLI, every subcommand: `preflight`, `init`, `plan set/show`, `unit set`, `dispatch open/close`, `lease take/check`, `handoff`, `stall record`, `worktree add/remove/sync`, `contract new/verify` (the dispatch and verifier prompts, filled from the checkpoint and the manifest), `gate run`, `report validate/save` (`save <unit> -` reads the worker's block from stdin), `integrate` (sync, merge, docs commit, integration gate, `unit set` as one step), `docs apply`, `push`, `archive check`, `status`, `cost`, `stale`, `pause`/`resume`, `next set`, `complete` (alias of `next set complete`), `harness set dispatch`, `help`. Every write takes a lock and validates the checkpoint against its schema before it lands |
 | [`schemas/`](schemas/) | (JSON Schema) | `checkpoint.schema.json` (run state, v2), `worker-report.schema.json` (the JSON block every worker returns), `gates-manifest.schema.json` (the per-repo gate manifest, with the optional `docs` and `ci` blocks; annotated example in [`examples/orchestrate-gates.json`](examples/orchestrate-gates.json)) |
 | [`templates/`](templates/) | (markdown) | `dispatch.md` (worker contract: preamble, criterion IDs, JSON report), `verify.md` (verifier dispatch with its required inputs), `reverify.md` (scoped re-verify over the open criteria only) |
 | [`scripts/preflight.sh`](scripts/preflight.sh) | (shell) | The harness check behind `orchestrate preflight`: Claude Code version, foreground flags, spawn depth, model-force; one JSON object, one verdict line, exit 0/2/1 |
@@ -287,6 +287,14 @@ Effort is a second, cheaper lever than model choice — Sonnet at `xhigh` often 
 | [`scripts/check-update.sh`](scripts/check-update.sh) + [`hooks/hooks.json`](hooks/hooks.json) | (shell, SessionStart) | Update notifier: tells you when a newer version exists and why it matters — never installs anything ([details](#updates)) |
 | [`tests/`](tests/) | (shell) | `cli.sh` exercises every CLI subcommand in a temp git repo; `hooks.sh` pipes fixture JSON through each hook and the preflight. Run both after an install |
 | [`portable/orchestrator.md`](portable/orchestrator.md) | (markdown) | The agent-agnostic edition for Codex, opencode, Cursor, Gemini CLI, Copilot, Aider — see [Using it outside Claude Code](#using-it-outside-claude-code) |
+
+A typical direct-mode run, per unit, is a handful of CLI calls around one Agent dispatch (every state change lands in `checkpoint.json` on the way):
+
+```
+orchestrate plan show                                  # paste it, then: worktree add U1 --at <sha>; contract new U1; edit the criteria
+orchestrate dispatch open U1 --role worker ... ; <Agent call> ; orchestrate report save U1 - <<'EOF' … EOF ; orchestrate gate run U1 unit --cwd <wt>
+orchestrate contract verify U1 --head <sha> ; <verifier Agent call> ; orchestrate integrate U1 [--cold]
+```
 
 ## Where this fits
 

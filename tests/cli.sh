@@ -979,6 +979,341 @@ check_contains "serial false skips checks" "checks:skipped" "$LAST_OUT"
 check_exit 0 "archive check after the v0.6.1 round" "$ORCH" archive check
 unset ORCHESTRATE_RUN GH_LOG
 
+# ---------------------------------------------------------------------------
+# v0.6.2: plan show (T), report save from stdin (6a), contract new / verify (6b), integrate (6c), init mode (8a), help (8e)
+# ---------------------------------------------------------------------------
+echo "== v0.6.2 setup (run v062)"
+cd "$REPO"
+cat > "$REPO/.claude/orchestrate-gates.json" <<'EOF'
+{
+  "install": "echo install >> bootstrap.txt", "envBootstrap": "echo env >> bootstrap.txt",
+  "cachePaths": [".cache"],
+  "gates": {
+    "unit": [ { "id": "ok", "cmd": "echo unit-ok" }, { "id": "baseline", "cmd": "git rev-parse --verify {{baseline}} > /dev/null" } ],
+    "integration": [ { "id": "ok", "cmd": "true" } ]
+  },
+  "docs": [ { "fragments": "docs/_pending", "target": "docs/features.md", "section": "## Changes" } ]
+}
+EOF
+git add .claude/orchestrate-gates.json docs && git commit -q -m "v062 setup" && git checkout -q main
+BASE_V=$(git rev-parse HEAD)
+check_true "root is on main and clean before the v0.6.2 round" test "$(git rev-parse --abbrev-ref HEAD)" = main -a -z "$(git status --porcelain --untracked-files=no)"
+check_exit 0 "help lists the v0.6.2 commands" "$ORCH" help
+check_contains "help header names the worktree location (8e)" "Worktrees: <root>/.claude/worktrees/<unit> (git-excluded" "$LAST_OUT"
+check_contains "help: worktree add names its default path" "git worktree add at <root>/.claude/worktrees/<unit>" "$LAST_OUT"
+check_contains "help: init --mode defaults to DIRECT (8a)" "--mode defaults to" "$LAST_OUT"
+check_contains "help: plan show" "plan show" "$LAST_OUT"
+check_contains "help: report save accepts -" "report save <unit> <file>|-" "$LAST_OUT"
+check_contains "help: contract new" "contract new <unit> [--objective <text>] [--files <csv>] [--force]" "$LAST_OUT"
+check_contains "help: contract verify" "contract verify <unit> --head <sha> [--deep] [--since <sha>] [--prior <ref>] [--scope C1,C3]" "$LAST_OUT"
+check_contains "help: integrate" "integrate <unit> [--cold] [--no-sync] [--no-docs]" "$LAST_OUT"
+check_true "example manifest carries the \$comment_gates rule (8d)" grep -q '"\$comment_gates"' "$PLUGIN_ROOT/examples/orchestrate-gates.json"
+check_contains "example \$comment_gates says baseline + --depends" "--depends" "$(grep '"\$comment_gates"' "$PLUGIN_ROOT/examples/orchestrate-gates.json")"
+
+echo "== init prints the mode"
+check_exit 0 "init --run v062 (default mode)" "$ORCH" init --run v062
+check_true "init prints mode: DIRECT first" test "$(printf '%s\n' "$LAST_OUT" | head -1)" = "mode: DIRECT"
+check_true "init still prints the run id last" test "$(printf '%s\n' "$LAST_OUT" | tail -1)" = "v062"
+check_true "init prints the archive path second" test "$(printf '%s\n' "$LAST_OUT" | sed -n 2p)" = "$RUNS/v062"
+check_true "default mode recorded as DIRECT" test "$(cpget dispatchMode "$RUNS/v062/checkpoint.json")" = "DIRECT"
+check_exit 0 "init --run v062f --mode FOREMAN" "$ORCH" init --run v062f --mode FOREMAN
+check_true "init prints mode: FOREMAN" test "$(printf '%s\n' "$LAST_OUT" | head -1)" = "mode: FOREMAN"
+export ORCHESTRATE_RUN=v062
+XCP="$RUNS/v062/checkpoint.json"
+XLOG="$RUNS/v062/dispatch-log.md"
+XARCH="$RUNS/v062"
+xunit() { python3 -c 'import json,sys; cp=json.load(open(sys.argv[1])); u=[x for x in cp["units"] if x["id"]==sys.argv[2]][0]; n=u
+for p in sys.argv[3].split("."): n=n[p]
+print(n if isinstance(n,str) else json.dumps(n))' "$XCP" "$1" "$2"; }
+
+echo "== plan show"
+check_exit 0 "plan show on an empty plan" "$ORCH" plan show
+check_true "empty plan: header, separator, blank, cap line" test "$LAST_OUT" = "| unit | tier | model | effort | isolation | verifier | slots | dispatches |
+|---|---|---|---|---|---|---|---|
+
+cap: 0/0 · mode: DIRECT · integration branch: main · run: v062"
+check_exit 0 "plan set V1 (sonnet, verified)" "$ORCH" plan set V1 --tier T1 --model sonnet --effort high --verifier fast
+check_true "plan set prints its own row" test "$(printf '%s\n' "$LAST_OUT" | head -1)" = "| V1 | T1 | sonnet | high | worktree | fast | 4 | 0/4 |"
+check_true "plan set prints the cap line after the row" test "$(printf '%s\n' "$LAST_OUT" | tail -1)" = "cap: 0/8 · mode: DIRECT · integration branch: main · run: v062"
+check_exit 0 "plan set V2 (haiku, unverified)" "$ORCH" plan set V2 --tier T0 --model haiku --effort low --verifier none
+check_true "haiku row shows effort '-'" test "$(printf '%s\n' "$LAST_OUT" | head -1)" = "| V2 | T0 | haiku | - | worktree | none | 2 | 0/2 |"
+check_exit 0 "plan show (two units)" "$ORCH" plan show
+check_true "plan show prints exactly the table, a blank line and the cap line" test "$LAST_OUT" = "| unit | tier | model | effort | isolation | verifier | slots | dispatches |
+|---|---|---|---|---|---|---|---|
+| V1 | T1 | sonnet | high | worktree | fast | 4 | 0/4 |
+| V2 | T0 | haiku | - | worktree | none | 2 | 0/2 |
+
+cap: 0/10 · mode: DIRECT · integration branch: main · run: v062"
+case "$LAST_OUT" in *ship*) fail "plan show lists the ship pseudo-unit" ;; *) pass "plan show omits the ship pseudo-unit" ;; esac
+check_exit 0 "plan set V3 --depends V1" "$ORCH" plan set V3 --tier T1 --model sonnet --effort low --verifier fast --depends V1
+check_true "plan set row carries the depends column once any unit has it" test "$(printf '%s\n' "$LAST_OUT" | head -1)" = "| V3 | T1 | sonnet | low | worktree | fast | 4 | 0/4 | V1 |"
+check_exit 0 "dispatch open V1 worker" "$ORCH" dispatch open V1 --role worker --epoch 1
+check_exit 0 "plan show with depends and a dispatch" "$ORCH" plan show
+check_true "depends header column" test "$(printf '%s\n' "$LAST_OUT" | head -1)" = "| unit | tier | model | effort | isolation | verifier | slots | dispatches | depends |"
+check_true "depends separator" test "$(printf '%s\n' "$LAST_OUT" | sed -n 2p)" = "|---|---|---|---|---|---|---|---|---|"
+check_true "V1 row: 1/4 dispatches, depends '-'" test "$(printf '%s\n' "$LAST_OUT" | sed -n 3p)" = "| V1 | T1 | sonnet | high | worktree | fast | 4 | 1/4 | - |"
+check_true "V3 row: depends V1" test "$(printf '%s\n' "$LAST_OUT" | sed -n 5p)" = "| V3 | T1 | sonnet | low | worktree | fast | 4 | 0/4 | V1 |"
+check_true "cap line counts the dispatch" test "$(printf '%s\n' "$LAST_OUT" | tail -1)" = "cap: 1/14 · mode: DIRECT · integration branch: main · run: v062"
+check_exit 0 "dispatch close V1 1" "$ORCH" dispatch close V1 1 --exit PASS --tokens 100 --duration 1
+check_exit 0 "plan show on the FOREMAN run" "$ORCH" --run v062f plan show
+check_true "FOREMAN cap line names the foreman model and effort" test "$(printf '%s\n' "$LAST_OUT" | tail -1)" = "cap: 0/0 · mode: FOREMAN · foreman: opus @ high · integration branch: main · run: v062f"
+check_exit 1 "plan show with an argument refused" "$ORCH" plan show V1
+check_exit 1 "plan bogus subcommand" "$ORCH" plan list
+
+echo "== report save from stdin (6a)"
+check_exit 0 "worktree add V1 at the default location" "$ORCH" worktree add V1 --at "$BASE_V"
+WTV="$REPO/.claude/worktrees/V1"
+check_true "default worktree path is <root>/.claude/worktrees/<unit>" test "$(printf '%s\n' "$LAST_OUT" | tail -1)" = "$WTV unit/V1"
+check_true ".claude/worktrees/ is git-excluded" git check-ignore -q .claude/worktrees
+mkdir -p "$WTV/out" && printf '3 passed\n' > "$WTV/out/test.log"
+echo "login" >> "$WTV/README.md"
+mkdir -p "$WTV/docs/_pending" && printf '# Login flow\n\nAdded login.\n' > "$WTV/docs/_pending/V1.md"
+git -C "$WTV" add README.md docs && git -C "$WTV" commit -q -m "V1: login"
+V1HEAD=$(git -C "$WTV" rev-parse HEAD)
+cat > "$WORK/report-V1.json" <<EOF
+{ "unit": "V1", "branch": "unit/V1", "baselineSha": "$BASE_V", "headSha": "$V1HEAD", "commits": ["$V1HEAD"], "filesChanged": ["README.md", "docs/_pending/V1.md"],
+  "gates": [ { "id": "ok", "cmd": "echo unit-ok", "exit": 0 } ],
+  "criteria": [ { "id": "C1", "status": "PASS", "evidence": "3 passed; out/test.log", "artifact": "out/test.log", "runCmd": "npm test" },
+                { "id": "C2", "status": "PASS", "evidence": "README.md:2" } ],
+  "deviations": [], "backgroundProcesses": "none" }
+EOF
+{ echo '```json'; cat "$WORK/report-V1.json"; echo '```'; } > "$WORK/report-V1.md"
+save_stdin() { "$ORCH" report save "$@" < "$STDIN_FILE"; }
+STDIN_FILE="$WORK/report-V1.md"
+check_exit 0 "report save V1 - reads the fenced block from stdin" save_stdin V1 - --run-criteria C1
+check_contains "stdin report validated as stdin, not a temp path" "VALID: stdin (unit V1, 2 criteria, 1 gates)" "$LAST_OUT"
+check_contains "artifact copied from the registered worktree" "artifacts: 1 file(s) copied" "$LAST_OUT"
+check_true "path printed last" test "$(printf '%s\n' "$LAST_OUT" | tail -1)" = "$XARCH/reports/V1-1.json"
+check_true "saved reports/V1-1.json as a bare object" python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["unit"]=="V1" and d["headSha"]==sys.argv[2]' "$XARCH/reports/V1-1.json" "$V1HEAD"
+check_true "stdin scratch file removed" test -z "$(ls "$XARCH/reports"/.stdin-* 2>/dev/null)"
+STDIN_FILE="$WORK/report-V1.json"
+check_exit 0 "report save V1 - with a bare object on stdin" save_stdin V1 -
+check_true "saved reports/V1-2.json" test -f "$XARCH/reports/V1-2.json"
+STDIN_FILE=/dev/null
+check_exit 1 "report save V1 - with empty stdin" save_stdin V1 -
+check_contains "empty stdin names the heredoc form" "report save V1 - <<'EOF'" "$LAST_OUT"
+STDIN_FILE="$WORK/report-running.json"
+check_exit 1 "report save V1 - with an invalid report on stdin" save_stdin V1 -
+check_true "invalid stdin report not saved, scratch removed" test ! -e "$XARCH/reports/V1-3.json" -a -z "$(ls "$XARCH/reports"/.stdin-* 2>/dev/null)"
+
+echo "== contract new (6b)"
+check_exit 1 "contract new without a registered worktree" "$ORCH" contract new V9
+check_contains "refusal tells the user to run worktree add" "run 'orchestrate worktree add V9 --at $BASE_V' first" "$LAST_OUT"
+check_true "nothing written for V9" test ! -e "$XARCH/dispatch/V9.md"
+check_exit 1 "contract new ship refused" "$ORCH" contract new ship
+check_exit 0 "contract new V1 --objective --files" "$ORCH" contract new V1 --objective "Add the login flow." --files "src/a.ts,src/b.ts"
+CV1="$XARCH/dispatch/V1.md"
+check_true "prints the path first" test "$(printf '%s\n' "$LAST_OUT" | head -1)" = "$CV1"
+check_contains "prints the Agent pointer sentence" "Agent prompt: read $CV1, execute exactly, final text = report per the contract's output format; do not use SendMessage or any messaging tool; your final text is your entire report." "$LAST_OUT"
+check_contains "lists the remaining placeholders per section" "remaining placeholders (edit $CV1 by hand):" "$LAST_OUT"
+check_contains "criteria stay placeholders" "## 3. Done-criteria: " "$LAST_OUT"
+check_contains "criterion placeholder listed" "<criterion>" "$LAST_OUT"
+check_contains "depth stays a placeholder" "## 5. Depth instruction: " "$LAST_OUT"
+check_contains "constraints stay placeholders" "<relevant paths, patterns to follow, things that must not change>" "$LAST_OUT"
+case "$LAST_OUT" in *"## 1. Objective"*) fail "objective still listed as a placeholder" ;; *) pass "objective filled: not listed" ;; esac
+CTEXT=$(cat "$CV1")
+check_contains "contract: title carries the unit" "# Dispatch contract: V1" "$CTEXT"
+check_contains "contract: objective in section 1" "Add the login flow." "$CTEXT"
+check_contains "contract: absolute worktree path + branch + baseline" "Worktree: \`$WTV\` on branch \`unit/V1\`, created at baseline \`$BASE_V\`." "$CTEXT"
+check_contains "contract: integration branch" "Integration branch: \`main\`" "$CTEXT"
+check_contains "contract: file scope from --files" "Files in scope: \`src/a.ts, src/b.ts\`." "$CTEXT"
+check_contains "contract: fragments dir and target from docs[0]" "write docs fragments to \`docs/_pending/V1.md\`" "$CTEXT"
+check_contains "contract: docs target" "never edit the target \`docs/features.md\`" "$CTEXT"
+check_true "contract: no gate command still carries {{baseline}}" test "$(grep -c 'verify {{baseline}}' "$CV1")" = 0
+check_contains "contract: Gates line from the manifest with {{baseline}} substituted" "\`ok: echo unit-ok; baseline: git rev-parse --verify $BASE_V > /dev/null\`" "$CTEXT"
+check_contains "contract: gates[] example from the manifest" "\"gates\": [ {\"id\": \"ok\", \"cmd\": \"echo unit-ok\", \"exit\": 0}, {\"id\": \"baseline\", \"cmd\": \"git rev-parse --verify $BASE_V > /dev/null\", \"exit\": 0} ]," "$CTEXT"
+check_contains "contract: envBootstrap filled" "\`envBootstrap\` (\`echo env >> bootstrap.txt\`)" "$CTEXT"
+check_contains "contract: install filled" "\`install\` (\`echo install >> bootstrap.txt\`)" "$CTEXT"
+check_contains "contract: token cap 400" "≤ 400 tokens" "$CTEXT"
+check_contains "contract: JSON example branch" "\"branch\": \"unit/V1\"" "$CTEXT"
+check_contains "contract: epoch filled in the dispatch open line" "dispatch open V1 --role worker --epoch 1" "$CTEXT"
+for leftover in "<unit>" "<absolute worktree path>" "<baselineSha>" "<integrationBranch>" "<declared file scope>" "<fragments>" "<docs[].target>" "<gate id: command, one per gate>" "<N>" "<One sentence"; do
+  case "$CTEXT" in *"$leftover"*) fail "contract still contains $leftover" ;; *) pass "contract has no $leftover" ;; esac
+done
+case "$CTEXT" in *"Shared-worktree git hygiene"*) fail "worktree-isolated contract kept the shared-worktree hygiene block" ;; *) pass "hygiene block dropped for worktree isolation" ;; esac
+check_contains "contract keeps the criteria placeholders for the orchestrator" "- C1 [run]: <criterion> · evidence:" "$CTEXT"
+check_true "dispatch-log has the contract line" grep -q "contract new V1: wrote dispatch/V1.md" "$XLOG"
+check_exit 1 "contract new V1 again refused" "$ORCH" contract new V1
+check_contains "refusal names --force" "pass --force" "$LAST_OUT"
+check_true "refusal left the file intact" test "$(cat "$CV1")" = "$CTEXT"
+check_exit 0 "contract new V1 --force (no objective, no files)" "$ORCH" contract new V1 --force
+check_contains "objective placeholder listed when not given" "## 1. Objective: <One sentence" "$LAST_OUT"
+check_contains "file scope placeholder listed when not given" "<declared file scope>" "$LAST_OUT"
+check_true "file scope placeholder kept in the file" grep -q "Files in scope: \`<declared file scope>\`" "$CV1"
+check_exit 0 "plan set V2 --isolation shared" "$ORCH" plan set V2 --tier T0 --model haiku --effort low --verifier none --isolation shared
+check_exit 0 "worktree add V2" "$ORCH" worktree add V2 --at "$BASE_V" --no-bootstrap --path "$WORK/wt-V2"
+check_exit 0 "contract new V2 (shared isolation)" "$ORCH" contract new V2
+check_true "shared contract keeps the hygiene block, heading cleaned" grep -q "^## Shared-worktree git hygiene$" "$XARCH/dispatch/V2.md"
+check_true "shared contract names its --path worktree" grep -q "Worktree: \`$WORK/wt-V2\`" "$XARCH/dispatch/V2.md"
+python3 - "$REPO/.claude/orchestrate-gates.json" <<'PY'
+import json, sys
+m = json.load(open(sys.argv[1])); del m["docs"]; json.dump(m, open(sys.argv[1], "w"), indent=2)
+PY
+check_exit 0 "contract new V2 --force without docs in the manifest" "$ORCH" contract new V2 --force
+check_true "no docs manifest: the Shared docs line says so" grep -q "^- Shared docs: no docs manifest" "$XARCH/dispatch/V2.md"
+mv "$REPO/.claude/orchestrate-gates.json" "$REPO/.claude/orchestrate-gates.json.off"
+check_exit 0 "contract new V2 --force without any manifest" "$ORCH" contract new V2 --force
+check_true "no manifest: Gates line stays a placeholder" grep -q "<gate id: command, one per gate>" "$XARCH/dispatch/V2.md"
+check_true "no manifest: install is none" grep -q "\`install\` (\`none\`)" "$XARCH/dispatch/V2.md"
+mv "$REPO/.claude/orchestrate-gates.json.off" "$REPO/.claude/orchestrate-gates.json"
+git -C "$REPO" checkout -q -- .claude/orchestrate-gates.json
+
+echo "== contract verify (6b)"
+check_exit 1 "contract verify without --head" "$ORCH" contract verify V1
+check_exit 1 "contract verify for a unit without a worktree" "$ORCH" contract verify V3 --head "$V1HEAD"
+check_exit 0 "worktree add V3" "$ORCH" worktree add V3 --at "$BASE_V" --no-bootstrap --path "$WORK/wt-V3"
+check_exit 1 "contract verify without a saved report" "$ORCH" contract verify V3 --head "$BASE_V"
+check_contains "refusal names report save" "no saved report reports/V3-<n>.json" "$LAST_OUT"
+# the orchestrator edits the criteria of the dispatch contract; verify copies them
+sed -e 's/^- C1 \[run\]: <criterion> · evidence: .*/- C1 [run]: unit tests pass · evidence: npm test, out\/test.log, exit 0/' \
+    -e 's/^- C2: <criterion> · evidence: .*/- C2: README mentions login · evidence: grep -n login README.md/' "$CV1" > "$CV1.tmp" && mv "$CV1.tmp" "$CV1"
+check_exit 0 "contract verify V1 --head" "$ORCH" contract verify V1 --head "$V1HEAD"
+VV1="$XARCH/dispatch/V1-verify.md"
+check_true "prints the path first" test "$(printf '%s\n' "$LAST_OUT" | head -1)" = "$VV1"
+check_true "prints the Agent pointer sentence" test "$(printf '%s\n' "$LAST_OUT" | sed -n 2p)" = "Agent prompt: read $VV1, execute exactly, final text = report per the contract's output format; do not use SendMessage or any messaging tool; your final text is your entire report."
+check_true "prints the dispatch open line for verifier-fast" test "$(printf '%s\n' "$LAST_OUT" | sed -n 3p)" = "dispatch: orchestrate dispatch open V1 --role verifier --epoch 1 --model haiku --effort low"
+check_contains "lists the remaining placeholders" "remaining placeholders:" "$LAST_OUT"
+VTEXT=$(cat "$VV1")
+check_contains "verify: title" "# Gate 2 verification: V1" "$VTEXT"
+check_contains "verify: verifier-fast" "Verifier: \`verifier-fast\`" "$VTEXT"
+check_contains "verify: repoRoot is the worktree" "| repoRoot | \`$WTV\` |" "$VTEXT"
+check_contains "verify: baselineSha" "| baselineSha | \`$BASE_V\` |" "$VTEXT"
+check_contains "verify: headSha" "| headSha | \`$V1HEAD\` |" "$VTEXT"
+check_contains "verify: diffRange baseline..head" "| diffRange | \`$BASE_V..$V1HEAD\` |" "$VTEXT"
+check_contains "verify: scope all" "| scope | \`all\` |" "$VTEXT"
+check_contains "verify: reportPath is the newest report" "| reportPath | \`$XARCH/reports/V1-2.json\` |" "$VTEXT"
+check_contains "verify: priorVerdictRef none" "| priorVerdictRef | \`none\` (first verification) |" "$VTEXT"
+check_contains "verify: C1 copied with the artifact from the report" "- C1 [run]: unit tests pass · settling evidence: artifact \`$XARCH/reports/V1-2-artifacts/out/test.log\` produced by \`npm test\`; judged from that file, never from the test source" "$VTEXT"
+check_contains "verify: C2 copied with its evidence" "- C2: README mentions login · settling evidence: grep -n login README.md" "$VTEXT"
+case "$VTEXT" in *"- Cn:"*) fail "verify kept the template's Cn line" ;; *) pass "verify dropped the template's Cn line" ;; esac
+check_contains "verify: command blocks use the worktree and the range" "git -C $WTV log --oneline $BASE_V..$V1HEAD | wc -l" "$VTEXT"
+check_contains "verify: ancestry check filled" "git -C $WTV merge-base --is-ancestor $BASE_V $V1HEAD" "$VTEXT"
+check_contains "verify: RANGE line filled" "RANGE: $BASE_V..$V1HEAD (<n> commits, <m> files)" "$VTEXT"
+for leftover in "<repoRoot>" "<diffRange>" "<unit>" "<archive>" "<absolute path of the unit worktree>" "<baselineSha" "<headSha" "<verifier-fast | verifier-deep>"; do
+  case "$VTEXT" in *"$leftover"*) fail "verify still contains $leftover" ;; *) pass "verify has no $leftover" ;; esac
+done
+check_true "dispatch-log has the verify line" grep -q "contract verify V1: wrote dispatch/V1-verify.md" "$XLOG"
+check_exit 0 "contract verify V1 --deep" "$ORCH" contract verify V1 --head "$V1HEAD" --deep
+check_contains "--deep: dispatch line sonnet xhigh" "dispatch: orchestrate dispatch open V1 --role verifier --epoch 1 --model sonnet --effort xhigh" "$LAST_OUT"
+check_true "--deep: verifier-deep in the file (overwritten in place)" grep -q "Verifier: \`verifier-deep\`" "$VV1"
+check_exit 0 "plan set V1 --verifier deep" "$ORCH" plan set V1 --tier T1 --model sonnet --effort high --verifier deep
+check_exit 0 "contract verify V1 (deep plan row)" "$ORCH" contract verify V1 --head "$V1HEAD"
+check_contains "deep plan row implies verifier-deep" "--model sonnet --effort xhigh" "$LAST_OUT"
+check_exit 0 "plan set V1 --verifier fast again" "$ORCH" plan set V1 --tier T1 --model sonnet --effort high --verifier fast
+check_exit 0 "contract verify V1 --prior (full re-verify)" "$ORCH" contract verify V1 --head "$V1HEAD" --prior gates/V1-gate2-1.md
+check_true "--prior fills priorVerdictRef" grep -q "| priorVerdictRef | \`gates/V1-gate2-1.md\` |" "$VV1"
+check_exit 1 "--scope without --since refused" "$ORCH" contract verify V1 --head "$V1HEAD" --scope C2
+check_contains "refusal names --since" "--scope needs --since <lastPassedSha>" "$LAST_OUT"
+check_exit 1 "--scope with an unknown criterion refused" "$ORCH" contract verify V1 --head "$V1HEAD" --scope C9 --since "$BASE_V"
+check_contains "refusal lists the contract's criteria" "it has C1, C2" "$LAST_OUT"
+check_true "no reverify file written by the refusals" test ! -e "$XARCH/dispatch/V1-reverify-1.md"
+check_exit 0 "contract verify V1 --scope C2 --since --prior" "$ORCH" contract verify V1 --head "$V1HEAD" --scope C2 --since "$BASE_V" --prior gates/V1-gate2-1.md
+RV1="$XARCH/dispatch/V1-reverify-1.md"
+check_true "scoped: writes dispatch/V1-reverify-1.md" test "$(printf '%s\n' "$LAST_OUT" | head -1)" = "$RV1" -a -f "$RV1"
+check_true "scoped: dispatch line uses --role reverify" test "$(printf '%s\n' "$LAST_OUT" | sed -n 3p)" = "dispatch: orchestrate dispatch open V1 --role reverify --epoch 1 --model haiku --effort low"
+RTEXT=$(cat "$RV1")
+check_contains "reverify: title" "# Scoped Gate 2 re-verification: V1" "$RTEXT"
+check_contains "reverify: diffRange lastPassed..head" "| diffRange | \`$BASE_V..$V1HEAD\` |" "$RTEXT"
+check_contains "reverify: scope" "| scope | \`C2\` |" "$RTEXT"
+check_contains "reverify: priorVerdictRef" "| priorVerdictRef | \`gates/V1-gate2-1.md\` |" "$RTEXT"
+check_contains "reverify: reportPath (fix-round report)" "| reportPath | \`$XARCH/reports/V1-2.json\` (the fix-round report) |" "$RTEXT"
+check_contains "reverify: only the scoped criterion, with the prior-verdict slot" "- C2: README mentions login · prior verdict: FAIL · <one line: what the prior verdict found> · settling evidence: grep -n login README.md" "$RTEXT"
+case "$RTEXT" in *"- C1"*) fail "reverify lists the out-of-scope C1" ;; *) pass "reverify omits out-of-scope criteria" ;; esac
+check_contains "reverify: lastPassedSha in prose" "PASSed at \`$BASE_V\`" "$RTEXT"
+check_contains "reverify: command block range" "git -C $WTV diff --stat $BASE_V..$V1HEAD" "$RTEXT"
+check_contains "reverify: remaining placeholder is the prior-verdict line" "remaining placeholders: <one line: what the prior verdict found>" "$LAST_OUT"
+check_exit 0 "second scoped verify numbers -2" "$ORCH" contract verify V1 --head "$V1HEAD" --scope C1,C2 --since "$BASE_V"
+check_true "writes dispatch/V1-reverify-2.md" test -f "$XARCH/dispatch/V1-reverify-2.md"
+check_true "two-criterion scope" grep -q "| scope | \`C1, C2\` |" "$XARCH/dispatch/V1-reverify-2.md"
+
+echo "== integrate (6c, 8b, 8f)"
+check_exit 1 "integrate unknown unit" "$ORCH" integrate V9
+check_exit 1 "integrate ship refused" "$ORCH" integrate ship
+echo "dirty" >> README.md
+check_exit 1 "integrate refused on a dirty root" "$ORCH" integrate V1
+check_contains "dirty refusal names the file" "uncommitted changes to tracked files" "$LAST_OUT"
+check_contains "dirty refusal lists it" " M README.md" "$LAST_OUT"
+git checkout -q -- README.md
+git checkout -q -b elsewhere
+check_exit 1 "integrate refused when the root is not on the integration branch" "$ORCH" integrate V1
+check_contains "branch refusal names both branches" "is on elsewhere, not on the integration branch main" "$LAST_OUT"
+git checkout -q main && git branch -q -D elsewhere
+check_true "refusals merged nothing" test "$(git rev-parse HEAD)" = "$BASE_V"
+check_exit 0 "unit set V2 spot-check (verifier none)" "$ORCH" unit set V2 pending --spot-check "read the diff"
+check_exit 0 "integrate V1 (warm: V2 and V3 still open)" "$ORCH" integrate V1
+ITEXT="$LAST_OUT"
+V1INT=$(git rev-parse HEAD)
+check_contains "integrate: sync step line" "sync: ok ($WTV merged $BASE_V install:skipped gates:PASS)" "$ITEXT"
+MERGE_SHA=$(git rev-parse HEAD~1)
+check_contains "integrate: merge step line" "merge: $MERGE_SHA (git merge --no-ff unit/V1 into main)" "$ITEXT"
+check_contains "integrate: docs step line" "docs: 1 inserted, committed $V1INT (docs(V1): apply fragments; fragment files deleted)" "$ITEXT"
+check_contains "integrate: gate step line (warm)" "gate: integration PASS (warm) → gates/V1-integration-1.json" "$ITEXT"
+check_contains "integrate: unit step line" "unit: unit V1: integrated" "$ITEXT"
+check_true "integrate: final line is integrated <unit> at <HEAD after the docs commit>" test "$(printf '%s\n' "$ITEXT" | tail -1)" = "integrated V1 at $V1INT"
+check_true "merge commit is --no-ff with the message merge V1" test "$(git log -1 --format=%s "$MERGE_SHA")" = "merge V1" -a "$(git rev-list --parents -n 1 "$MERGE_SHA" | wc -w | tr -d ' ')" = 3
+check_true "docs commit message" test "$(git log -1 --format=%s HEAD)" = "docs(V1): apply fragments"
+check_true "fragment deleted and its deletion committed (8f)" test ! -e docs/_pending/V1.md -a -z "$(git status --porcelain --untracked-files=no)"
+check_true "target updated in the docs commit" grep -q "### V1: Login flow" docs/features.md
+check_true "unit V1 integrated with the docs-commit sha (8b)" test "$(xunit V1 status)" = integrated -a "$(xunit V1 sha)" = "$V1INT"
+check_true "unit V1 evidence is the integration gate json" test "$(xunit V1 evidenceRef)" = "gates/V1-integration-1.json"
+check_true "lastIntegratedSha bumped" test "$(cpget lastIntegratedSha "$XCP")" = "$V1INT"
+check_true "integration gate ran warm" test "$(cpget cold "$XARCH/gates/V1-integration-1.json")" = "false"
+check_true "dispatch-log has the integrate line" grep -q "integrate V1: merged unit/V1 as $MERGE_SHA, docs commit $V1INT, integration gate PASS (gates/V1-integration-1.json), integrated at $V1INT" "$XLOG"
+check_exit 1 "integrate V1 again refused (already integrated)" "$ORCH" integrate V1
+# conflict: V3 and main both edit README.md
+echo "V3 side" > "$WORK/wt-V3/README.md" && git -C "$WORK/wt-V3" commit -q -am "V3: readme"
+echo "main side" > README.md && git commit -q -am "main: readme"
+MAINC=$(git rev-parse HEAD)
+check_exit 3 "integrate V3: sync conflict exits 3" "$ORCH" integrate V3
+check_contains "sync conflict names the file" "conflict: README.md" "$LAST_OUT"
+check_contains "sync step reports FAIL, nothing merged" "sync: FAIL (conflict or unit gate FAIL in $WORK/wt-V3; nothing merged into main)" "$LAST_OUT"
+check_true "main unchanged after the sync conflict" test "$(git rev-parse HEAD)" = "$MAINC"
+check_exit 3 "integrate V3 --no-sync: merge conflict exits 3" "$ORCH" integrate V3 --no-sync
+check_contains "--no-sync skipped the sync" "sync: skipped (--no-sync)" "$LAST_OUT"
+check_contains "merge conflict aborted" "merge aborted, main unchanged at $MAINC" "$LAST_OUT"
+check_contains "merge conflict names the file" "conflict: README.md" "$LAST_OUT"
+check_true "main unchanged, no merge in progress, clean" test "$(git rev-parse HEAD)" = "$MAINC" -a ! -e "$(git rev-parse --git-path MERGE_HEAD)" -a -z "$(git status --porcelain --untracked-files=no)"
+check_true "V3 still pending" test "$(xunit V3 status)" = pending
+check_exit 0 "unit set V3 failed (V2 becomes the last open unit)" "$ORCH" unit set V3 failed
+# gate FAIL: merge stays, unit is not marked; cold implied for the last unit
+echo "v2" > "$WORK/wt-V2/v2.txt" && mkdir -p "$WORK/wt-V2/docs/_pending" && printf '# V2 note\n\nfrom V2\n' > "$WORK/wt-V2/docs/_pending/V2.md"
+git -C "$WORK/wt-V2" add v2.txt docs && git -C "$WORK/wt-V2" commit -q -m "V2 work"
+python3 - "$REPO/.claude/orchestrate-gates.json" <<'PY'
+import json, sys
+m = json.load(open(sys.argv[1])); m["gates"]["integration"] = [{"id": "bad", "cmd": "echo integration-fails; exit 9"}]; json.dump(m, open(sys.argv[1], "w"), indent=2)
+PY
+git commit -q -am "manifest: failing integration gate"
+mkdir -p .cache && echo blob > .cache/blob
+check_exit 3 "integrate V2 --no-docs: integration gate FAIL exits 3" "$ORCH" integrate V2 --no-docs
+V2MERGE=$(git rev-parse HEAD)
+check_contains "docs skipped" "docs: skipped (--no-docs)" "$LAST_OUT"
+check_contains "gate FAIL line: cold implied for the last unit, merge kept, unit not marked" "gate: integration FAIL (cold, last unit) → gates/V2-integration-1.json; merge $V2MERGE left on main, unit V2 NOT marked" "$LAST_OUT"
+check_true "merge V2 is HEAD (left in place)" test "$(git log -1 --format=%s)" = "merge V2"
+check_true "cold run deleted cachePaths in the root" test ! -e .cache
+check_true "gate json records cold" test "$(cpget cold "$XARCH/gates/V2-integration-1.json")" = "true"
+check_true "V2 not marked integrated" test "$(xunit V2 status)" = pending -a "$(xunit V2 sha)" = ""
+check_true "--no-docs left the fragment in place" test -f docs/_pending/V2.md
+check_true "dispatch-log records the FAIL" grep -q "integrate V2: merged unit/V2 as $V2MERGE, integration gate FAIL (gates/V2-integration-1.json), unit not marked" "$XLOG"
+python3 - "$REPO/.claude/orchestrate-gates.json" <<'PY'
+import json, sys
+m = json.load(open(sys.argv[1])); m["gates"]["integration"] = [{"id": "ok", "cmd": "true"}]; json.dump(m, open(sys.argv[1], "w"), indent=2)
+PY
+git commit -q -am "manifest: fixed integration gate"
+check_exit 0 "integrate V2 again after the fix" "$ORCH" integrate V2
+V2INT=$(git rev-parse HEAD)
+check_contains "re-run: nothing to merge" "merge: nothing to merge (unit/V2 is already in main at" "$LAST_OUT"
+check_contains "re-run: docs applied and committed" "docs: 1 inserted, committed $V2INT" "$LAST_OUT"
+check_contains "re-run: gate PASS cold, last unit" "gate: integration PASS (cold, last unit) → gates/V2-integration-2.json" "$LAST_OUT"
+check_true "re-run: integrated at the docs commit" test "$(printf '%s\n' "$LAST_OUT" | tail -1)" = "integrated V2 at $V2INT" -a "$(xunit V2 sha)" = "$V2INT"
+check_true "V2 fragment gone, root clean" test ! -e docs/_pending/V2.md -a -z "$(git status --porcelain --untracked-files=no)"
+check_true "nextAction ship-gate after the last unit" test "$(cpget nextAction "$XCP")" = "ship-gate"
+check_exit 0 "plan show after integration (dispatch counts)" "$ORCH" plan show
+check_exit 0 "archive check after the v0.6.2 round" "$ORCH" archive check
+check_exit 0 "worktree remove V1" "$ORCH" worktree remove V1
+check_exit 0 "worktree remove V2" "$ORCH" worktree remove V2
+check_exit 0 "worktree remove V3" "$ORCH" worktree remove V3
+unset ORCHESTRATE_RUN
+
 echo
 echo "== summary: $PASS_COUNT passed, $FAIL_COUNT failed"
 [ "$FAIL_COUNT" -eq 0 ]

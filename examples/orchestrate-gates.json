@@ -12,6 +12,7 @@
     "note": "Workers share the pnpm content-addressable store (pnpm store path), so 'install' in a fresh worktree links instead of downloading. Point PNPM_HOME/pnpm store at one location for every worktree."
   },
 
+  "$comment_gates": "Every unit-stage command must succeed on the baseline (the commit 'orchestrate init' recorded) before the first dispatch: Gate 1 runs the unit gates in every unit worktree, and parallel units start from the baseline. A gate that only exists after some unit lands (a test runner U1 creates, a script U2 adds) is not a manifest gate: it is that unit's own [run] criterion in its dispatch contract, and every unit that needs it takes 'plan set <U> --depends <that unit>' so it starts after the integration instead.",
   "gates": {
     "unit": [
       { "$comment": "Warm gates, run by the worker and re-run by the dispatcher at Gate 1 inside the unit worktree.", "id": "typecheck", "cmd": "pnpm typecheck" },
