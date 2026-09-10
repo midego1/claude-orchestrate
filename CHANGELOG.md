@@ -4,6 +4,20 @@ All notable changes to the orchestrate plugin. The update notifier reads this fi
 
 ## [Unreleased]
 
+## [0.6.3] — 2026-09-10
+
+The v0.6.2 field run asked for a way to test a release the same way every time and get a score instead of an eight-question report. `claude plugin eval` is that runner but still early access (per-organisation, not self-enabled), so this release ships the cases plus a stand-in harness with the same layout.
+
+**Why update:** every release can now be scored on a fixture repo, with and without the plugin loaded, in one command (`evals/run.sh`): outcome graders for both arms, protocol graders for the plugin arm, and the dollar cost of each arm from the trace, so "does the skill follow the CLI" and "what does the plugin cost per task" stop being anecdotes.
+
+- **`evals/run.sh`**: headless `claude -p` per case and arm, fresh fixture repo per run, `--output-format stream-json` trace kept, graders run in the fixture with `RUN_DIR`/`TRACE`/`RESULT`/`FINAL`/`ARM`/`PLUGIN_ROOT`, score = passed/scored, cost and turns from the result record, `results/<stamp>/summary.md`. The with arm loads the plugin from the checkout (`--plugin-dir`, so a branch is tested before release) and names that path as the plugin root in a system-prompt line; the without arm drops user settings (`--setting-sources project`), which hides every installed plugin (probed on 2.1.260). Graders marked `# with-only` are plugin indicators, scored only in the with arm (the `claude plugin eval` ablation rule)
+- **Cases**: `direct-mode-smoke` (the first live field run as a case) and `gate2-trap` (one easy-to-skip spec detail, checked by a mutation grader that breaks `shout` and expects the runner to still report). Shared fixture in `evals/_common/scaffold.sh`, shared graders in `evals/_common/graders/`
+- **Fixture manifest**: the unit `test` gate is `test ! -f test.js || node test.js`, so a gate that only exists after a unit passes on the baseline (the v0.6.2 rule) and the units can run in parallel
+- **First scored runs** (`direct-mode-smoke`, opus orchestrator, sonnet/haiku dispatches, 2.1.260): with plugin 14/14 after grader fixes, USD 3.11, 37 turns, 7.7 min, 5 dispatches, verifier verdicts archived; without plugin 6/6 outcome graders, USD 0.28, 5 turns, 0.5 min. On a two-unit task the plugin buys evidence (run artifacts, independent Gate 2, archive), not outcome; the trap case exists to measure where that evidence pays. Two things the runs showed: the first with-arm run recorded the verifier's evidence as `dispatch/U1-verify.md` (the prompt) instead of the archived verdict, and the second named the verdict `gates/U1-verify-2.txt` rather than the template's `gates/<unit>-gate2-<n>.md`: `dispatch close --role verifier` should require an evidence file under `gates/` that carries `VERDICT:` (next release). The first baseline run found the installed plugin under `~/.claude/plugins/cache` through the fixture's CLAUDE.md and ran the protocol by hand for USD 4.71; the without arm now carries a system-prompt fence and the CLAUDE.md line says "when available"
+- **CLAUDE.md**: the feedback loop ends with the scored eval
+- **`tests/cli.sh`**: resolves `ORCH_TEST_TMP` to its physical path first; under macOS `mktemp` (`/var` → `/private/var`) 20 path checks failed on 0.6.2 for that reason alone
+- **Migration from 0.6.2**: none
+
 ## [0.6.2] — 2026-09-10
 
 First live `/orchestrate` run on v0.6.1 (2 units, direct mode, 5 dispatches, 296k tokens, COMPLETED, archive clean). The CLI-enforced rules held; the prose-only ones did not: the routing table was never shown, and four steps were still done by hand. Every finding below became a command.

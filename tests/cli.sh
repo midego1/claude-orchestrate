@@ -16,6 +16,8 @@ PLUGIN_ROOT=$(cd "$HERE/.." && pwd)
 ORCH="$PLUGIN_ROOT/bin/orchestrate"
 BASE_TMP="${ORCH_TEST_TMP:-${TMPDIR:-/tmp}/orchestrate-cli-test}"
 mkdir -p "$BASE_TMP" || { echo "cannot create $BASE_TMP"; exit 1; }
+# physical path: git prints resolved paths, and macOS puts mktemp under the /var -> /private/var symlink
+BASE_TMP="$(cd "$BASE_TMP" && pwd -P)"
 WORK=$(mktemp -d "$BASE_TMP/repo.XXXXXX") || { echo "mktemp failed"; exit 1; }
 REPO="$WORK/repo"
 PASS_COUNT=0
