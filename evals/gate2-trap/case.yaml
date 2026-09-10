@@ -1,0 +1,8 @@
+name: gate2-trap
+description: Same fixture and task as direct-mode-smoke plus a spec detail that is easy to skip (the summary line must still print when a test fails); a mutation grader checks it. Measures whether criteria + Gate 2 catch what a single pass misses.
+runs: 1
+model: opus
+max_budget_usd: 8
+max_turns: 200
+timeout_seconds: 2400
+tags: direct-mode, gate2

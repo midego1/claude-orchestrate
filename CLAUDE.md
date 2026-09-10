@@ -21,4 +21,4 @@ This repo is a Claude Code plugin: prose that agents follow (`skills/orchestrate
 
 ## Field feedback loop
 
-Each release starts from a field report (see CHANGELOG). New findings go through: reproduce or quote → decide CLI vs prose → implement with tests → adversarial review → live run in a fresh session (`/orchestrate` on a small repo, report the eight questions in the handoff prompt).
+Each release starts from a field report (see CHANGELOG). New findings go through: reproduce or quote → decide CLI vs prose → implement with tests → adversarial review → live run in a fresh session (`/orchestrate` on a small repo, report the eight questions in the handoff prompt) → scored eval (`evals/run.sh`, see `evals/README.md`: the same task with and without the plugin, outcome and protocol graders, cost per arm; `claude plugin eval` once early access is on).

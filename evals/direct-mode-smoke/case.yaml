@@ -1,0 +1,8 @@
+name: direct-mode-smoke
+description: Two-unit feature on a tiny node package; mirrors the first live field run. Outcome graders score both arms, protocol graders (with-only) check the CLI-driven direct-mode loop.
+runs: 1
+model: opus
+max_budget_usd: 8
+max_turns: 200
+timeout_seconds: 2400
+tags: direct-mode, smoke
