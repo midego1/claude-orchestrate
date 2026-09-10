@@ -418,9 +418,10 @@ def op_plan_set(args):
     u.setdefault("dependsOn", [])
     recompute_cap(cp)
     save_cp(cp, cp_path)
-    t = cp["dispatchTally"]
-    print("unit %s: tier %s model %s effort %s verifier %s isolation %s slots %d; cap %d (%s)" % (
-        uid, u["tier"], u["model"], u["effort"], u["verifier"], u["isolation"], slots(u), t["cap"], t.get("capSource", "")))
+    # the unit's own routing-table row (same shape as 'plan show'), then the cap line
+    _, show_dep = plan_units(cp)
+    print(plan_row(u, show_dep))
+    print(cap_line(cp))
 
 def op_unit_set(args):
     cp_path, uid, status = args[0], args[1], args[2]
@@ -751,7 +752,8 @@ def op_archive_check(args):
         sys.exit(1)
     print("archive check: OK (%s)" % archive)
 
-FENCE = chr(96) * 3   # a markdown code fence (kept out of the source: this library lives inside a bash $( ) heredoc)
+BT = chr(96)          # a backtick (kept out of the source: this library lives inside a bash $( ) heredoc)
+FENCE = BT * 3        # a markdown code fence
 FENCE_RE = re.compile(r"\A\s*" + FENCE + r"[A-Za-z0-9_-]*[ \t]*\r?\n(.*?)\r?\n?[ \t]*" + FENCE + r"\s*\Z", re.DOTALL)
 
 def load_report(path):
@@ -1189,8 +1191,379 @@ def op_gate_json(args):
     os.replace(tmp, out)
     print(doc["result"])
 
+# ---- v0.6.2: plan show, contract new / verify, integrate helpers ----------
+PLAN_COLS = ("unit", "tier", "model", "effort", "isolation", "verifier", "slots", "dispatches")
+
+def plan_units(cp):
+    """(non-ship units in plan order, whether any of them has dependsOn)."""
+    units = [u for u in cp.get("units", []) if not is_ship(u)]
+    return units, any(u.get("dependsOn") for u in units)
+
+def plan_header(show_dep):
+    cols = list(PLAN_COLS) + (["depends"] if show_dep else [])
+    return ["| " + " | ".join(cols) + " |", "|" + "---|" * len(cols)]
+
+def plan_row(u, show_dep):
+    used = len(u.get("dispatches", []))
+    effort = "-" if u.get("model", "") == "haiku" else (u.get("effort", "") or "-")
+    cells = [u.get("id", ""), u.get("tier", ""), u.get("model", ""), effort, u.get("isolation", ""),
+             u.get("verifier", ""), str(slots(u)), "%d/%d" % (used, slots(u))]
+    if show_dep:
+        cells.append(",".join(u.get("dependsOn", [])) or "-")
+    return "| " + " | ".join(cells) + " |"
+
+def foreman_spec():
+    """'opus @ high' from agents/foreman.md's frontmatter (fallback to those values)."""
+    model, effort = "opus", "high"
+    root = os.environ.get("ORCH_PLUGIN_ROOT", "")
+    try:
+        with open(os.path.join(root, "agents", "foreman.md"), "r", encoding="utf-8") as f:
+            parts = f.read().split("---", 2)
+        front = parts[1] if len(parts) >= 3 else ""
+        for line in front.splitlines():
+            k, _, v = line.partition(":")
+            if k.strip() == "model" and v.strip():
+                model = v.strip()
+            if k.strip() == "effort" and v.strip():
+                effort = v.strip()
+    except OSError:
+        pass
+    return "%s @ %s" % (model, effort)
+
+def cap_line(cp):
+    t = cp.get("dispatchTally", {})
+    mode = cp.get("dispatchMode", "DIRECT")
+    if mode == "FOREMAN":
+        mode = "FOREMAN · foreman: " + foreman_spec()
+    return "cap: %s/%s · mode: %s · integration branch: %s · run: %s" % (
+        t.get("used", 0), t.get("cap", 0), mode, cp.get("integrationBranch", ""), cp.get("runId", ""))
+
+def op_plan_show(args):
+    cp = load_cp(args[0])
+    units, show_dep = plan_units(cp)
+    for line in plan_header(show_dep):
+        print(line)
+    for u in units:
+        print(plan_row(u, show_dep))
+    print("")
+    print(cap_line(cp))
+
+PLACEHOLDER_RE = re.compile(r"<[^<>\n]+>")
+
+def read_text(path, what):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read()
+    except OSError as e:
+        die("%s not readable: %s: %s" % (what, path, e))
+
+def write_text(path, text):
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(text)
+    os.replace(tmp, path)
+
+def worktree_entry(cp, uid):
+    for w in cp.get("openWorktrees", []):
+        if w.get("unit") == uid:
+            return w
+    return None
+
+def newest_report(reports_dir, unit):
+    """(path, n) of reports/<unit>-<n>.json with the highest n, or (None, 0)."""
+    best, best_n = None, 0
+    for f in glob.glob(os.path.join(reports_dir, glob.escape(unit) + "-*.json")):
+        m = re.match(r"^" + re.escape(unit) + r"-(\d+)\.json$", os.path.basename(f))
+        if m and int(m.group(1)) > best_n:
+            best, best_n = f, int(m.group(1))
+    return best, best_n
+
+def section_bounds(lines, pred):
+    """[(start, end)] of every section whose heading line satisfies pred (end = next heading of the same or
+    higher level, or EOF); fenced blocks are skipped by headings()."""
+    hs = list(headings(lines))
+    out = []
+    for i, (idx, lv) in enumerate(hs):
+        if not pred(lines[idx]):
+            continue
+        end = len(lines)
+        for j in range(i + 1, len(hs)):
+            if hs[j][1] <= lv:
+                end = hs[j][0]
+                break
+        out.append((idx, end))
+    return out
+
+def remaining_placeholders(lines, pred):
+    """[(heading, [placeholders])] for the sections whose heading satisfies pred, outside fenced blocks."""
+    out = []
+    for start, end in section_bounds(lines, pred):
+        found, in_fence = [], False
+        for l in lines[start + 1:end]:
+            if is_fence(l):
+                in_fence = not in_fence
+                continue
+            if in_fence:
+                continue
+            for m in PLACEHOLDER_RE.findall(l):
+                if m not in found:
+                    found.append(m)
+        if found:
+            out.append((lines[start].strip(), found))
+    return out
+
+def print_remaining(path, items, flat=False):
+    if not items:
+        print("remaining placeholders: none")
+        return
+    if flat:
+        seen = []
+        for _, ps in items:
+            seen += [p for p in ps if p not in seen]
+        print("remaining placeholders: " + ", ".join(seen))
+        return
+    print("remaining placeholders (edit %s by hand):" % path)
+    for h, ps in items:
+        print("  %s: %s" % (h.split(" (")[0], ", ".join(ps)))
+
+def drop_section(lines, pred):
+    for start, end in reversed(section_bounds(lines, pred)):
+        while start > 0 and not lines[start - 1].strip():
+            start -= 1
+        del lines[start:end]
+    return lines
+
+def gate_cmds_json(cmds):
+    return "[ " + ", ".join(json.dumps({"id": i, "cmd": c, "exit": 0}) for i, c in cmds) + " ]"
+
+def op_contract_new(args):
+    # contract-new <cp> <manifest|-> <template> <archive> <unit> [--objective <text>] [--files <csv>] [--force]
+    cp_path, manifest_file, template, archive, unit = args[:5]
+    opts, _ = parse_opts(args[5:], {"--objective": "v", "--files": "v", "--force": "flag"})
+    if is_ship(unit):
+        die("contract new: 'ship' is the ship-gate pseudo-unit; it has no worker contract")
+    cp = load_cp(cp_path)
+    out = os.path.join(archive, "dispatch", unit + ".md")
+    if os.path.exists(out) and not opts.get("--force"):
+        die("contract new: %s exists (pass --force to overwrite it)" % out)
+    w = worktree_entry(cp, unit)
+    if w is None:
+        die("contract new: no worktree registered for %s; run 'orchestrate worktree add %s --at %s' first"
+            % (unit, unit, cp.get("baselineSha") or "<baselineSha>"))
+    u = find_unit(cp, unit) or {}
+    if not u:
+        sys.stderr.write("orchestrate: warning: %s is not in the plan (run 'orchestrate plan set %s ...'); isolation assumed worktree\n" % (unit, unit))
+    path, branch, baseline = w.get("path", ""), w.get("branch", "") or ("unit/" + unit), w.get("baselineSha", "") or cp.get("baselineSha", "")
+    manifest = load_json(manifest_file, "manifest") if manifest_file != "-" else None
+    if manifest is not None:
+        validate_or_die(manifest, schema_path("gates-manifest.schema.json"), "manifest")
+    text = read_text(template, "template")
+    # branch: the template names the worktree add default and asks for the real name
+    text = re.sub(r" \(the " + BT + "orchestrate worktree add" + BT + " default; state the real name if " + BT + "--branch" + BT + " overrode it\)", "", text)
+    text = text.replace("unit/<unit>", branch)
+    for k, v in (("<absolute worktree path>", path), ("<worktree>", path), ("<wt>", path), ("<branch>", branch),
+                 ("<baselineSha>", baseline), ("<integrationBranch>", cp.get("integrationBranch", "")),
+                 ("<archive>", archive), ("<epoch>", str(cp.get("owner", {}).get("epoch", 1))), ("<N>", "400")):
+        text = text.replace(k, v)
+    # gates: the manifest's unit stage with {{baseline}} substituted, as the Gates line and the gates[] example
+    cmds = []
+    if manifest is not None:
+        cmds = [(c["id"], c["cmd"].replace("{{baseline}}", baseline)) for c in (manifest.get("gates") or {}).get("unit") or []]
+    if cmds:
+        text = text.replace("<gate id: command, one per gate>", "; ".join("%s: %s" % (i, c) for i, c in cmds))
+        text = re.sub(r'^([ \t]*)"gates": \[.*\](,?)[ \t]*$', lambda m: '%s"gates": %s%s' % (m.group(1), gate_cmds_json(cmds), m.group(2)), text, flags=re.M)
+    env = (manifest or {}).get("envBootstrap") or "none"
+    inst = (manifest or {}).get("install") or "none"
+    text = text.replace("<envBootstrap, e.g. cp -n .env.example .env>", env)
+    text = text.replace("<install command, frozen lockfile, e.g. pnpm install --frozen-lockfile>", inst)
+    text = text.replace("<install command>", inst)
+    docs = (manifest or {}).get("docs") or []
+    if docs:
+        text = text.replace("<fragments>", docs[0].get("fragments", "")).replace("<docs[].target>", docs[0].get("target", ""))
+    else:
+        text = re.sub(r"^- Shared docs:.*$", "- Shared docs: no docs manifest (the manifest has no " + BT + "docs[]" + BT + " entry): write no fragments; put user-facing notes in " + BT + "notes" + BT + ".", text, flags=re.M)
+    if opts.get("--files"):
+        files = [x.strip() for x in opts["--files"].split(",") if x.strip()]
+        text = text.replace("<declared file scope>", ", ".join(files))
+    text = text.replace("<unit>", unit)
+    lines = text.splitlines()
+    if opts.get("--objective"):
+        objective = opts["--objective"].strip()
+        done = False
+        for start, end in section_bounds(lines, lambda l: re.match(r"#+ 1\.", l)):
+            for i in range(start + 1, end):
+                s = lines[i].strip()
+                if s and PLACEHOLDER_RE.fullmatch(s):
+                    lines[i] = objective
+                    done = True
+                    break
+            if not done:
+                lines.insert(start + 1, "")
+                lines.insert(start + 2, objective)
+                done = True
+            break
+        if not done:
+            die("contract new: template has no '## 1.' section for --objective")
+    if (u.get("isolation") or "worktree") != "shared":
+        drop_section(lines, lambda l: l.lstrip("#").strip().startswith("Shared-worktree git hygiene"))
+    else:
+        lines = [re.sub(r"^(#+ Shared-worktree git hygiene) \(keep only when.*\)\s*$", r"\1", l) for l in lines]
+    os.makedirs(os.path.dirname(out), exist_ok=True)
+    write_text(out, "\n".join(lines).rstrip("\n") + "\n")
+    print(out)
+    print("Agent prompt: read %s, execute exactly, final text = report per the contract's output format; do not use SendMessage or any messaging tool; your final text is your entire report." % out)
+    print_remaining(out, remaining_placeholders(lines, lambda l: re.match(r"#+ \d+\.", l)))
+
+CRIT_RE = re.compile(r"^- (C\d+)( \[run\])?:\s*(.*)$")
+CRIT_LINE_RE = re.compile(r"^- C(\d+|n)( \[run\])?:")   # a criterion line, including the template's '- Cn:' example
+
+def contract_criteria(archive, unit):
+    """{id: (tag, text, evidence)} from the '## 3.' section of dispatch/<unit>.md; None when the file is absent."""
+    p = os.path.join(archive, "dispatch", unit + ".md")
+    if not os.path.isfile(p):
+        return None
+    lines = read_text(p, "dispatch contract").splitlines()
+    out = {}
+    for start, end in section_bounds(lines, lambda l: re.match(r"#+ 3\.", l)):
+        in_fence = False
+        for l in lines[start + 1:end]:
+            if is_fence(l):
+                in_fence = not in_fence
+                continue
+            m = None if in_fence else CRIT_RE.match(l)
+            if m:
+                text, _, ev = m.group(3).partition(" · evidence: ")
+                out[m.group(1)] = (m.group(2) or "", text.strip(), ev.strip())
+    return out
+
+def op_contract_verify(args):
+    # contract-verify <cp> <templates dir> <archive> <unit> --head <sha> [--deep] [--since <sha>] [--prior <ref>] [--scope C1,C3]
+    cp_path, tdir, archive, unit = args[:4]
+    opts, _ = parse_opts(args[4:], {"--head": "v", "--deep": "flag", "--since": "v", "--prior": "v", "--scope": "v"})
+    head = opts.get("--head", "").strip()
+    if not head:
+        die("contract verify: --head <sha> is required (the headSha from the worker report)")
+    scope = [x.strip() for x in opts.get("--scope", "").split(",") if x.strip()]
+    since = opts.get("--since", "").strip()
+    if scope and not since:
+        die("contract verify: --scope needs --since <lastPassedSha> (the head the prior verdict evaluated)")
+    cp = load_cp(cp_path)
+    w = worktree_entry(cp, unit)
+    if w is None:
+        die("contract verify: no worktree registered for %s (the verifier reads the unit worktree)" % unit)
+    u = find_unit(cp, unit) or {}
+    path, baseline = w.get("path", ""), w.get("baselineSha", "") or cp.get("baselineSha", "")
+    deep = bool(opts.get("--deep")) or u.get("verifier") == "deep"
+    vname, vmodel, veffort = ("verifier-deep", "sonnet", "xhigh") if deep else ("verifier-fast", "haiku", "low")
+    report, n = newest_report(os.path.join(archive, "reports"), unit)
+    if report is None:
+        die("contract verify: no saved report reports/%s-<n>.json (run 'orchestrate report save %s -' first)" % (unit, unit))
+    artifacts = os.path.join(archive, "reports", "%s-%d-artifacts" % (unit, n))
+    diff_range = "%s..%s" % (since or baseline, head)
+    template = os.path.join(tdir, "reverify.md" if scope else "verify.md")
+    text = read_text(template, "template")
+    if scope:
+        k = 1
+        while os.path.exists(os.path.join(archive, "dispatch", "%s-reverify-%d.md" % (unit, k))):
+            k += 1
+        out = os.path.join(archive, "dispatch", "%s-reverify-%d.md" % (unit, k))
+    else:
+        out = os.path.join(archive, "dispatch", unit + "-verify.md")
+    prior = opts.get("--prior", "").strip()
+    reps = [("<baselineSha>..<headSha>", diff_range), ("<lastPassedSha>..<headSha>", diff_range), ("<diffRange>", diff_range),
+            ("<verifier-fast | verifier-deep>", vname),
+            ("<haiku for verifier-fast | sonnet for verifier-deep>", vmodel), ("<low | xhigh>", veffort),
+            ("<same verifier model as the prior verdict: haiku for verifier-fast | sonnet for verifier-deep>", vmodel),
+            ("<same effort: low | xhigh>", veffort),
+            ("<absolute path of the unit worktree>", path), ("<repoRoot>", path), ("<wt>", path),
+            ("<baselineSha recorded at dispatch>", baseline), ("<baselineSha>", baseline),
+            ("<headSha from the fix-round worker report>", head), ("<headSha from the worker report>", head), ("<headSha>", head),
+            ("<archive>/reports/<unit>-<n>-artifacts/", artifacts + "/"), ("<archive>/reports/<unit>-<n>.json", report),
+            ("<epoch>", str(cp.get("owner", {}).get("epoch", 1)))]
+    if since:
+        reps.append(("<lastPassedSha>", since))
+    if prior:
+        reps.append(("<archive>/gates/<unit>-gate2-<n-1>.md", prior))
+    if scope:
+        reps.append(("<open criterion IDs, e.g. C2, C4>", ", ".join(scope)))
+    if cp.get("lastIntegratedSha"):
+        reps.append(("<lastIntegratedSha>", cp["lastIntegratedSha"]))
+    reps += [("<archive>", archive), ("<unit>", unit)]
+    for k, v in reps:
+        text = text.replace(k, v)
+    if prior and not scope:
+        text = re.sub(r"^\| priorVerdictRef \|.*\|[ \t]*$", "| priorVerdictRef | %s%s%s |" % (BT, prior, BT), text, flags=re.M)
+    lines = text.splitlines()
+    crits = contract_criteria(archive, unit)
+    rep_doc = load_json(report, "report")
+    rep_crit = {c.get("id"): c for c in rep_doc.get("criteria", []) if isinstance(c, dict)} if isinstance(rep_doc, dict) else {}
+    if crits is None:
+        sys.stderr.write("orchestrate: warning: no dispatch/%s.md; criteria left as the template's placeholders\n" % unit)
+    else:
+        if scope:
+            missing = [c for c in scope if c not in crits]
+            if missing:
+                die("contract verify: --scope %s: not a criterion of dispatch/%s.md (it has %s)" % (",".join(missing), unit, ", ".join(sorted(crits, key=lambda c: int(c[1:]))) or "none"))
+            ids = scope
+        else:
+            ids = sorted(crits, key=lambda c: int(c[1:]))
+        new = []
+        for cid in ids:
+            tag, ctext, ev = crits[cid]
+            rc = rep_crit.get(cid, {})
+            if rc.get("artifact"):
+                ev = "artifact %s%s%s produced by %s%s%s; judged from that file, never from the test source" % (
+                    BT, os.path.join(artifacts, rc["artifact"]), BT, BT, rc.get("runCmd") or "<runCmd from the report>", BT)
+            elif tag and not ev:
+                ev = "artifact %s%s/<file>%s produced by %s<runCmd from the report>%s; judged from that file, never from the test source" % (BT, artifacts, BT, BT, BT)
+            elif not ev:
+                ev = "<exact command, invariant, diff scope, or what a judgment must rest on>"
+            mid = " · prior verdict: FAIL · <one line: what the prior verdict found>" if scope else ""
+            new.append("- %s%s: %s%s · settling evidence: %s" % (cid, tag, ctext, mid, ev))
+        for start, end in section_bounds(lines, lambda l: l.lstrip("#").strip().startswith("Criteria")):
+            idx = [i for i in range(start + 1, end) if CRIT_LINE_RE.match(lines[i])]
+            if idx:
+                lines[idx[0]:idx[-1] + 1] = new
+            break
+    os.makedirs(os.path.dirname(out), exist_ok=True)
+    write_text(out, "\n".join(lines).rstrip("\n") + "\n")
+    print(out)
+    print("Agent prompt: read %s, execute exactly, final text = report per the contract's output format; do not use SendMessage or any messaging tool; your final text is your entire report." % out)
+    print("dispatch: orchestrate dispatch open %s --role %s --epoch %s --model %s --effort %s" % (
+        unit, "reverify" if scope else "verifier", cp.get("owner", {}).get("epoch", 1), vmodel, veffort))
+    # what the orchestrator still edits: the Inputs table rows and the criteria lines (the rest is verifier-side)
+    left = []
+    for start, end in section_bounds(lines, lambda l: l.lstrip("#").strip().startswith(("Inputs", "Criteria"))):
+        for l in lines[start + 1:end]:
+            if l.startswith("|") or CRIT_LINE_RE.match(l):
+                left += [p for p in PLACEHOLDER_RE.findall(l) if p not in left]
+    print_remaining(out, [("", left)] if left else [], flat=True)
+
+def op_integrate_info(args):
+    # integrate-info <cp> <unit>: one TSV line: unit branch, worktree path, integrationBranch, unit status, last-unit flag
+    cp = load_cp(args[0])
+    uid = args[1]
+    u = find_unit(cp, uid)
+    if u is None or is_ship(u):
+        die("integrate: unknown unit %s (run 'orchestrate plan set %s ...' first)" % (uid, uid))
+    w = worktree_entry(cp, uid) or {}
+    others = [x for x in cp.get("units", []) if not is_ship(x) and x.get("id") != uid]
+    last = all(x.get("status") in CLOSED_STATUSES for x in others)
+    print("%s\t%s\t%s\t%s\t%s" % (w.get("branch", ""), w.get("path", ""), cp.get("integrationBranch", ""), u.get("status", ""), "1" if last else "0"))
+
+def op_manifest_docs_paths(args):
+    m = load_json(args[0], "manifest")
+    seen = []
+    for e in m.get("docs") or []:
+        for p in (e.get("target"), e.get("fragments")):
+            if p and p not in seen:
+                seen.append(p)
+                print(p)
+
 OPS = {
     "validate": op_validate, "newest-run": op_newest_run, "age": op_age, "get": op_get,
+    "plan-show": op_plan_show, "contract-new": op_contract_new, "contract-verify": op_contract_verify,
+    "integrate-info": op_integrate_info, "manifest-docs-paths": op_manifest_docs_paths,
     "init-seed": op_init_seed, "plan-set": op_plan_set, "unit-set": op_unit_set,
     "dispatch-open": op_dispatch_open, "dispatch-close": op_dispatch_close,
     "lease-take": op_lease_take, "lease-check": op_lease_check, "stall-record": op_stall_record,
@@ -1215,7 +1588,7 @@ PY
 )
 
 py() {
-  ORCH_SCHEMA_DIR="$SCHEMA_DIR" python3 -c "$PYLIB" "$@"
+  ORCH_SCHEMA_DIR="$SCHEMA_DIR" ORCH_PLUGIN_ROOT="$PLUGIN_ROOT" python3 -c "$PYLIB" "$@"
 }
 
 die() {
@@ -1227,12 +1600,38 @@ usage() {
   cat <<'EOF'
 usage: orchestrate [--root <path>] [--run <id>] <subcommand> [args]
 
+Archive:   <root>/.claude/orchestrate-runs/<run>/ (git-excluded by init)
+Worktrees: <root>/.claude/worktrees/<unit> (git-excluded; the 'worktree add' default, printed by it and filled in by 'contract new')
+
   preflight [--json]                                  run scripts/preflight.sh; harness JSON + verdict; exit 0 allowed, 2 refused, 1 error
-  init [--run <id>] [--branch <name>] [--cap <n>] [--mode FOREMAN|DIRECT]
-                                                      create the run archive atomically (orchestrator only); exclude it from git; print path + run id
+  init [--run <id>] [--branch <name>] [--cap <n>] [--mode DIRECT|FOREMAN]
+                                                      create the run archive atomically (orchestrator only); exclude it from git; --mode defaults to
+                                                      DIRECT (FOREMAN only when handing the loop to a foreman); prints "mode: <mode>", path, run id
   plan set <id> --tier T0..T3 --model <alias> --effort <e> --verifier none|fast|deep [--isolation worktree|shared] [--depends a,b]
-                                                      add or update a planned unit; recompute the cap from planned slots
-                                                      ('ship' is reserved: init seeds it as the ship-gate pseudo-unit, outside the slot sum)
+                                                      add or update a planned unit; recompute the cap from planned slots; prints the unit's routing-table
+                                                      row + the cap line ('ship' is reserved: init seeds it as the ship-gate pseudo-unit, outside the slot sum)
+  plan show                                           print the routing table from the checkpoint (| unit | tier | model | effort | isolation | verifier |
+                                                      slots | dispatches |, a trailing depends column when any unit has --depends, effort '-' for haiku,
+                                                      ship omitted), a blank line, then "cap: <used>/<cap> · mode: <m> · integration branch: <b> · run: <id>";
+                                                      paste it verbatim into the reply before the first dispatch
+  contract new <unit> [--objective <text>] [--files <csv>] [--force]
+                                                      write dispatch/<unit>.md from templates/dispatch.md with every value the CLI knows filled in (worktree
+                                                      path + branch + baseline from openWorktrees, integration branch, unit gates with {{baseline}} replaced,
+                                                      envBootstrap/install, docs[0] fragments dir + target, token cap 400, epoch); criteria, constraints and
+                                                      depth stay <placeholders> and are listed; needs 'worktree add' first; refuses to overwrite without --force
+  contract verify <unit> --head <sha> [--deep] [--since <sha>] [--prior <ref>] [--scope C1,C3]
+                                                      write dispatch/<unit>-verify.md from templates/verify.md (with --scope: dispatch/<unit>-reverify-<n>.md
+                                                      from reverify.md; --scope needs --since <lastPassedSha>) with worktree, baseline, head, diffRange
+                                                      (<baseline>..<head>, or <since>..<head>), newest reports/<unit>-<n>.json + its artifacts dir, verifier
+                                                      (verifier-fast; verifier-deep with --deep or a deep plan row), the criteria copied from dispatch/<unit>.md;
+                                                      prints the path, the Agent pointer sentence and the dispatch open line
+  integrate <unit> [--cold] [--no-sync] [--no-docs]   one step in the integration root (refused, exit 1, unless it is on integrationBranch and clean):
+                                                      worktree sync <unit> --gate (exit 3 = conflict or unit gate FAIL, nothing merged), git merge --no-ff
+                                                      <unit branch> -m "merge <unit>" (conflict: abort, list files, exit 3), docs apply <unit> + commit
+                                                      "docs(<unit>): apply fragments" when it inserted anything, gate run <unit> integration (--cold; implied
+                                                      for the last open unit), unit set <unit> integrated --sha <HEAD after the docs commit> --evidence
+                                                      gates/<unit>-integration-<n>.json. Gate FAIL: exit 3, merge kept, unit NOT marked. One line per step,
+                                                      then "integrated <unit> at <sha>"
   unit set <id> <status> [--sha <sha>] [--evidence <ref>] [--spot-check <text>]
                                                       set a unit status (pending|in-flight|integrated|failed|surfaced); recomputes nextAction
                                                       (in-flight unit → unchanged; first pending → "dispatch <id>"; none → "ship-gate";
@@ -1247,9 +1646,10 @@ usage: orchestrate [--root <path>] [--run <id>] <subcommand> [args]
   handoff --to foreman|orchestrator                   planned handoff: owner + dispatchMode change, epoch kept
   stall record                                        increment stallCount, set lastStallAt
   worktree add <unit> --at <sha> [--branch <name>] [--path <dir>] [--no-bootstrap] [--detach]
-                                                      git worktree add on branch unit/<unit> (default; --branch overrides; an existing branch is
-                                                      reused only when it points at <sha>) + manifest envBootstrap/install; registers in
-                                                      openWorktrees; prints "<path> <branch>". --detach: detached HEAD, prints the path only
+                                                      git worktree add at <root>/.claude/worktrees/<unit> (default; --path overrides) on branch unit/<unit>
+                                                      (default; --branch overrides; an existing branch is reused only when it points at <sha>) + manifest
+                                                      envBootstrap/install; registers in openWorktrees; prints "<path> <branch>". --detach: detached HEAD,
+                                                      prints the path only
   worktree remove <unit> [--force]                    git worktree remove + deregister (--force drops uncommitted tracked changes)
   worktree sync <unit> [--no-bootstrap] [--force-install] [--gate]
                                                       git merge <integrationBranch> in the unit's worktree (conflict: abort, list the files, exit 3,
@@ -1270,8 +1670,9 @@ usage: orchestrate [--root <path>] [--run <id>] <subcommand> [args]
                                                       falls back to the previous stage), else the unit's newest reports/<unit>-<n>.json gates[]
   report validate <file>                              validate a worker report against schemas/worker-report.schema.json; the file may hold a
                                                       bare JSON object or the worker's verbatim fenced block (```json ... ```)
-  report save <unit> <file> [--worktree <dir>] [--run-criteria C1,C2]
-                                                      validate (Gate 1 rules, unit must match) and copy (fences stripped) to reports/<unit>-<n>.json.
+  report save <unit> <file>|- [--worktree <dir>] [--run-criteria C1,C2]
+                                                      validate (Gate 1 rules, unit must match) and copy (fences stripped) to reports/<unit>-<n>.json;
+                                                      '-' reads the worker's final text from stdin (orchestrate report save <unit> - <<'EOF' ... EOF).
                                                       A PASS criterion listed in --run-criteria (needs artifact + runCmd) or carrying "artifact"
                                                       must name a non-empty file under the worktree (default: the unit's registered worktree, else
                                                       the cwd), else INVALID naming it; artifacts are copied to reports/<unit>-<n>-artifacts/
@@ -1324,6 +1725,13 @@ release_lock() {
   LOCK_DIR=""
 }
 
+SCRATCH=""   # one temp file (stdin capture) removed on exit, whatever the exit path
+
+on_exit() {
+  release_lock
+  [ -z "$SCRATCH" ] || rm -f "$SCRATCH" 2>/dev/null
+}
+
 take_lock() {
   local lock="$ARCHIVE/.lock" tries=0 age
   while ! mkdir "$lock" 2>/dev/null; do
@@ -1339,7 +1747,7 @@ take_lock() {
   done
   LOCK_DIR="$lock"
   echo "$$" > "$lock/pid" 2>/dev/null || true
-  trap release_lock EXIT
+  trap on_exit EXIT
 }
 
 locked_py() {
@@ -1477,16 +1885,173 @@ cmd_init() {
   exclude_add ".claude/orchestrate-runs/" || echo "orchestrate: warning: could not update .git/info/exclude" >&2
   mv "$tmp" "$RUNS_DIR/$run_id" || die "init: cannot move archive into place"
   trap - EXIT
+  echo "mode: $mode"
   echo "$RUNS_DIR/$run_id"
   echo "$run_id"
 }
 
 cmd_plan() {
-  [ "${1:-}" = "set" ] || die "usage: orchestrate plan set <id> --tier .. --model .. --effort .. --verifier .."
+  local sub="${1:-}"
+  shift || true
+  case "$sub" in
+    set)
+      [ -n "${1:-}" ] || die "plan set: missing unit id"
+      resolve_run
+      locked_py plan-set "$CHECKPOINT" "$@" ;;
+    show)
+      [ $# -eq 0 ] || die "plan show takes no arguments"
+      resolve_run
+      py plan-show "$CHECKPOINT" ;;
+    *) die "usage: orchestrate plan set <id> --tier .. --model .. --effort .. --verifier .. | plan show" ;;
+  esac
+}
+
+cmd_contract() {
+  # contract new <unit> [--objective <text>] [--files <csv>] [--force] | contract verify <unit> --head <sha> [--deep] [--since <sha>] [--prior <ref>] [--scope C1,C3]
+  local sub="${1:-}" unit manifest tmpl out rc
+  shift || true
+  unit="${1:-}"
+  case "$sub" in new|verify) ;; *) die "usage: orchestrate contract new <unit> [--objective <text>] [--files <csv>] [--force] | contract verify <unit> --head <sha> [--deep] [--since <sha>] [--prior <ref>] [--scope C1,C3]" ;; esac
+  [ -n "$unit" ] || die "contract $sub: missing unit"
   shift
-  [ -n "${1:-}" ] || die "plan set: missing unit id"
   resolve_run
-  locked_py plan-set "$CHECKPOINT" "$@"
+  mkdir -p "$ARCHIVE/dispatch" || die "contract $sub: cannot create $ARCHIVE/dispatch"
+  case "$sub" in
+    new)
+      tmpl="$PLUGIN_ROOT/templates/dispatch.md"
+      [ -f "$tmpl" ] || die "contract new: template missing: $tmpl (this plugin install is incomplete)"
+      manifest=$(manifest_path) || manifest="-"
+      out=$(py contract-new "$CHECKPOINT" "$manifest" "$tmpl" "$ARCHIVE" "$unit" "$@")
+      rc=$?
+      [ -z "$out" ] || printf '%s\n' "$out"
+      [ $rc -eq 0 ] || exit $rc
+      log_line "contract new $unit: wrote dispatch/$unit.md from templates/dispatch.md" ;;
+    verify)
+      [ -f "$PLUGIN_ROOT/templates/verify.md" ] && [ -f "$PLUGIN_ROOT/templates/reverify.md" ] || die "contract verify: templates/verify.md or reverify.md missing (this plugin install is incomplete)"
+      out=$(py contract-verify "$CHECKPOINT" "$PLUGIN_ROOT/templates" "$ARCHIVE" "$unit" "$@")
+      rc=$?
+      [ -z "$out" ] || printf '%s\n' "$out"
+      [ $rc -eq 0 ] || exit $rc
+      log_line "contract verify $unit: wrote $(printf '%s\n' "$out" | head -1 | sed "s#^$ARCHIVE/##")" ;;
+  esac
+}
+
+cmd_integrate() {
+  # integrate <unit> [--cold] [--no-sync] [--no-docs]: sync + gate, merge --no-ff, docs apply + commit,
+  # integration gate, unit set integrated; one line per step, then "integrated <unit> at <sha>".
+  local unit="${1:-}" cold=0 sync=1 docs=1 info branch path branch_i status last cur dirty out rc before merge_sha
+  local manifest inserted docs_sha head json evidence label p cold_flag=""
+  [ -n "$unit" ] || die "integrate: missing unit"
+  shift
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --cold) cold=1; shift ;;
+      --no-sync) sync=0; shift ;;
+      --no-docs) docs=0; shift ;;
+      *) die "integrate: unknown argument $1" ;;
+    esac
+  done
+  resolve_run
+  info=$(py integrate-info "$CHECKPOINT" "$unit") || exit 1
+  IFS=$'\t' read -r branch path branch_i status last <<EOF
+$info
+EOF
+  [ "$status" != "integrated" ] || die "integrate: unit $unit is already integrated (orchestrate unit set $unit pending to redo it)"
+  [ -n "$branch_i" ] || die "integrate: the checkpoint has no integrationBranch"
+  cur=$(git -C "$ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null) || die "integrate: $ROOT is not a git checkout"
+  [ "$cur" = "$branch_i" ] || die "integrate: refused: $ROOT is on $cur, not on the integration branch $branch_i (git checkout $branch_i first; nothing done)"
+  dirty=$(git -C "$ROOT" status --porcelain --untracked-files=no 2>/dev/null)
+  if [ -n "$dirty" ]; then
+    echo "orchestrate: integrate: refused: $ROOT has uncommitted changes to tracked files (commit or stash them first; nothing done):" >&2
+    printf '%s\n' "$dirty" | sed 's/^/  /' >&2
+    exit 1
+  fi
+  [ -n "$branch" ] || branch="unit/$unit"
+  git -C "$ROOT" rev-parse --verify --quiet "refs/heads/$branch^{commit}" > /dev/null || die "integrate: unit branch $branch does not exist (no worktree registered for $unit and no unit/$unit branch)"
+  [ "$last" = "1" ] && cold=1
+  [ $cold -eq 1 ] && cold_flag="--cold"
+  # 1. sync: merge the integration branch into the unit worktree and re-run the unit gates there
+  if [ $sync -eq 1 ]; then
+    [ -n "$path" ] || die "integrate: no open worktree registered for $unit (pass --no-sync to merge branch $branch as it is)"
+    out=$("$SCRIPT_DIR/orchestrate" --root "$ROOT" --run "$RUN_ID" worktree sync "$unit" --gate 2>&1)
+    rc=$?
+    case "$rc" in
+      0) printf '%s\n' "$out"; echo "sync: ok ($(printf '%s\n' "$out" | tail -1))" ;;
+      3) printf '%s\n' "$out" >&2; echo "sync: FAIL (conflict or unit gate FAIL in $path; nothing merged into $branch_i)" >&2; exit 3 ;;
+      *) printf '%s\n' "$out" >&2; exit "$rc" ;;
+    esac
+  else
+    echo "sync: skipped (--no-sync)"
+  fi
+  # 2. merge --no-ff into the integration branch
+  before=$(git -C "$ROOT" rev-parse HEAD)
+  if ! out=$(GIT_MERGE_AUTOEDIT=no git -C "$ROOT" merge --no-ff "$branch" -m "merge $unit" 2>&1); then
+    dirty=$(git -C "$ROOT" diff --name-only --diff-filter=U 2>/dev/null)
+    if [ -n "$dirty" ] || [ -e "$(git -C "$ROOT" rev-parse --git-path MERGE_HEAD 2>/dev/null)" ]; then
+      git -C "$ROOT" merge --abort > /dev/null 2>&1 || git -C "$ROOT" reset -q --merge > /dev/null 2>&1 || true
+      echo "orchestrate: integrate $unit: merging $branch into $branch_i conflicts; merge aborted, $branch_i unchanged at $before" >&2
+      echo "CONFLICT: resolve in the unit worktree (orchestrate worktree sync $unit, fix, commit), then re-run 'orchestrate integrate $unit'" >&2
+      printf '%s\n' "$dirty" | sed '/^$/d; s/^/  conflict: /' >&2
+      exit 3
+    fi
+    printf '%s\n' "$out" >&2
+    die "integrate: git merge --no-ff $branch failed in $ROOT"
+  fi
+  merge_sha=$(git -C "$ROOT" rev-parse HEAD)
+  if [ "$merge_sha" = "$before" ]; then
+    echo "merge: nothing to merge ($branch is already in $branch_i at $before)"
+  else
+    echo "merge: $merge_sha (git merge --no-ff $branch into $branch_i)"
+  fi
+  # 3. docs: apply the unit's fragments and commit target(s) + fragment deletion(s)
+  if [ $docs -eq 0 ]; then
+    echo "docs: skipped (--no-docs)"
+  elif ! manifest=$(manifest_path); then
+    echo "docs: no manifest, nothing to apply"
+  else
+    out=$("$SCRIPT_DIR/orchestrate" --root "$ROOT" --run "$RUN_ID" docs apply "$unit" --cwd "$ROOT" 2>&1)
+    rc=$?
+    [ -z "$out" ] || printf '%s\n' "$out" | grep -v "^docs apply $unit:" || true
+    if [ $rc -ne 0 ]; then
+      echo "orchestrate: integrate $unit: docs apply failed (exit $rc); merge $merge_sha is on $branch_i, unit $unit not marked" >&2
+      exit "$rc"
+    fi
+    inserted=$(printf '%s\n' "$out" | sed -n "s/^docs apply $unit: \([0-9][0-9]*\) inserted.*/\1/p" | tail -1)
+    if [ "${inserted:-0}" -gt 0 ]; then
+      py manifest-docs-paths "$manifest" | while IFS= read -r p; do
+        git -C "$ROOT" add -A -- "$p" > /dev/null 2>&1 || true
+      done
+      if git -C "$ROOT" diff --cached --quiet; then
+        echo "docs: $inserted inserted, nothing to commit"
+      else
+        git -C "$ROOT" commit -q -m "docs($unit): apply fragments" || die "integrate: docs commit failed in $ROOT"
+        docs_sha=$(git -C "$ROOT" rev-parse HEAD)
+        echo "docs: $inserted inserted, committed $docs_sha (docs($unit): apply fragments; fragment files deleted)"
+      fi
+    else
+      echo "docs: nothing to apply"
+    fi
+  fi
+  # 4. integration gate in the root (cold when asked, or when this is the last open unit)
+  out=$("$SCRIPT_DIR/orchestrate" --root "$ROOT" --run "$RUN_ID" gate run "$unit" integration --cwd "$ROOT" $cold_flag 2>&1)
+  rc=$?
+  printf '%s\n' "$out"
+  json=$(printf '%s\n' "$out" | sed -n 's/^integration gate: [A-Z]* → //p' | tail -1)
+  evidence="gates/${json##*/}"
+  if [ $cold -eq 1 ]; then label="cold"; [ "$last" = "1" ] && label="cold, last unit"; else label="warm"; fi
+  case "$rc" in
+    0) echo "gate: integration PASS ($label) → $evidence" ;;
+    3) echo "gate: integration FAIL ($label) → $evidence; merge $merge_sha left on $branch_i, unit $unit NOT marked (fix on the unit branch, then re-run 'orchestrate integrate $unit')" >&2
+       log_line "integrate $unit: merged $branch as $merge_sha, integration gate FAIL ($evidence), unit not marked"
+       exit 3 ;;
+    *) exit "$rc" ;;
+  esac
+  # 5. record: HEAD after the docs commit is the unit's integrated sha
+  head=$(git -C "$ROOT" rev-parse HEAD)
+  out=$(locked_py unit-set "$CHECKPOINT" "$unit" integrated --sha "$head" --evidence "$evidence") || exit 1
+  echo "unit: $out"
+  log_line "integrate $unit: merged $branch as $merge_sha${docs_sha:+, docs commit $docs_sha}, integration gate PASS ($evidence), integrated at $head"
+  echo "integrated $unit at $head"
 }
 
 cmd_unit() {
@@ -1882,7 +2447,7 @@ EOF
 }
 
 cmd_report() {
-  local sub="${1:-}" unit file n dest wt="" run_criteria="" out
+  local sub="${1:-}" unit file n dest wt="" run_criteria="" out rc
   shift || true
   case "$sub" in
     validate)
@@ -1890,7 +2455,7 @@ cmd_report() {
       py report-check "$1" ;;
     save)
       unit="${1:-}"; file="${2:-}"
-      [ -n "$unit" ] && [ -n "$file" ] || die "report save: need <unit> <file>"
+      [ -n "$unit" ] && [ -n "$file" ] || die "report save: need <unit> <file> (or '-' for stdin)"
       shift 2
       while [ $# -gt 0 ]; do
         case "$1" in
@@ -1900,10 +2465,23 @@ cmd_report() {
         esac
       done
       resolve_run
+      if [ "$file" = "-" ]; then
+        # the worker's final text straight from stdin (bare object or fenced block), e.g. report save U1 - <<'EOF' ... EOF
+        mkdir -p "$ARCHIVE/reports"
+        SCRATCH="$ARCHIVE/reports/.stdin-$unit.$$"
+        trap on_exit EXIT
+        cat > "$SCRATCH" || die "report save: cannot read stdin"
+        [ -s "$SCRATCH" ] || die "report save: nothing on stdin (pipe the worker's report: orchestrate report save $unit - <<'EOF' ... EOF)"
+        file="$SCRATCH"
+      fi
       # [run] artifacts are looked up under --worktree, else the unit's registered worktree, else the cwd
       [ -n "$wt" ] || wt=$(py worktree-path "$CHECKPOINT" "$unit" 2>/dev/null) || wt="$PWD"
       [ -d "$wt" ] || die "report save: worktree $wt does not exist"
-      py report-check "$file" "$unit" --worktree "$wt" --run-criteria "$run_criteria" || exit 1
+      out=$(py report-check "$file" "$unit" --worktree "$wt" --run-criteria "$run_criteria")
+      rc=$?
+      [ -z "$SCRATCH" ] || out="${out//"$SCRATCH"/stdin}"
+      [ -z "$out" ] || printf '%s\n' "$out"
+      [ $rc -eq 0 ] || exit 1
       mkdir -p "$ARCHIVE/reports"
       take_lock
       n=1
@@ -2012,6 +2590,8 @@ main() {
     preflight) cmd_preflight "$@" ;;
     init) cmd_init "$@" ;;
     plan) cmd_plan "$@" ;;
+    contract) cmd_contract "$@" ;;
+    integrate) cmd_integrate "$@" ;;
     unit) cmd_unit "$@" ;;
     dispatch) cmd_dispatch "$@" ;;
     lease) cmd_lease "$@" ;;
