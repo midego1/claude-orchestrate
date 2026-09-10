@@ -34,7 +34,9 @@
         "properties": {
           "id": { "type": "string", "pattern": "^C[0-9]+$" },
           "status": { "type": "string", "enum": ["PASS", "FAIL", "EXECUTION-PENDING"] },
-          "evidence": { "type": "string" }
+          "evidence": { "type": "string" },
+          "artifact": { "type": "string", "minLength": 1, "description": "[run] criteria: repo-relative path of the runner's output (a tee'd log, a junit/json report). 'orchestrate report save' refuses a PASS whose artifact is missing or empty under the worktree, and copies it to reports/<unit>-<n>-artifacts/." },
+          "runCmd": { "type": "string", "minLength": 1, "description": "[run] criteria: the exact command that produced the artifact; with EXECUTION-PENDING it is what the dispatcher runs post-merge." }
         }
       }
     },

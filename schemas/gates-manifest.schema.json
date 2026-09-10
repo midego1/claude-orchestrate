@@ -53,6 +53,29 @@
         }
       }
     },
+    "docs": {
+      "type": "array",
+      "description": "Shared docs assembled by 'orchestrate docs apply <unit>' at integration time: each entry takes <fragments>/<unit>.md (and <unit>-*.md), inserts its body at the end of the named section of <target> under '### <unit>: <fragment title>' (line-based, no regex over the body), deletes the fragment; a section already holding '### <unit>:' is skipped. Workers write fragments, never the target.",
+      "items": {
+        "type": "object",
+        "required": ["fragments", "target", "section"],
+        "properties": {
+          "fragments": { "type": "string", "minLength": 1, "description": "Directory (relative to the integration root) that workers drop <unit>.md fragments into." },
+          "target": { "type": "string", "minLength": 1, "description": "The shared document (relative to the integration root) the fragments are inserted into." },
+          "section": { "type": "string", "minLength": 1, "description": "Exact heading line that must exist in the target (e.g. '## Changes'); 'docs apply' exits 1 naming it when absent." },
+          "$comment": { "type": "string" }
+        }
+      }
+    },
+    "ci": {
+      "type": "object",
+      "description": "How 'orchestrate push' treats CI. serial true: one PR's checks at a time (push refuses with exit 2 while another unit's checks are recorded running, or when gh is missing), checksCmd is run on the branch after the push (default 'gh pr checks --watch'; the branch name is appended as its last argument).",
+      "properties": {
+        "serial": { "type": "boolean", "description": "Default false. true: a single CI runner; never queue two PRs' checks at once." },
+        "checksCmd": { "type": "string", "minLength": 1, "description": "Run with bash -c in the unit worktree, the branch appended; exit 0 = checks pass. Default 'gh pr checks --watch'." },
+        "$comment": { "type": "string" }
+      }
+    },
     "pricing": {
       "type": "object",
       "description": "Per model alias. inPerMTok/outPerMTok apply when a dispatch records tokensIn/tokensOut; perMTok is a blended rate applied to the plain tokens total. Without a usable rate, 'orchestrate cost' prints no USD.",

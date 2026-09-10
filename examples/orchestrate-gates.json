@@ -29,6 +29,14 @@
     ]
   },
 
+  "$comment_docs": "Shared docs: workers write docs/_pending/<unit>.md (first line '# <title>', then the body) and never touch the target; at integration 'orchestrate docs apply <unit>' inserts the body at the end of the named section under '### <unit>: <title>' and deletes the fragment. The section is an exact heading line that must exist in the target.",
+  "docs": [
+    { "fragments": "docs/_pending", "target": "docs/features.md", "section": "## Changes" }
+  ],
+
+  "$comment_ci": "One self-hosted runner: 'orchestrate push <unit> --pr' pushes and opens PRs one unit at a time, running checksCmd (the branch appended) and waiting for it before the next unit may push. Drop 'ci' (or set serial false) when CI runs PRs in parallel.",
+  "ci": { "serial": true, "checksCmd": "gh pr checks --watch --fail-fast" },
+
   "pricing": {
     "$comment": "USD per million tokens, e.g. \"sonnet\": { \"inPerMTok\": 3, \"outPerMTok\": 15, \"perMTok\": 6 }. Fill in the current list prices; until then the empty objects make 'orchestrate cost' print 'USD n/a' (a rate of 0 is treated the same way, never as free). perMTok is a blended rate for dispatches that recorded only a tokens total.",
     "haiku":  {},
